@@ -872,6 +872,19 @@ impl AnthropicMessagesParams {
         };
 
         // --- Input messages ---
+        // Build tool_use_id → name mapping from all messages first, so tool_result
+        // blocks can resolve their tool names (Anthropic wire only carries tool_use_id).
+        let mut tool_use_name_map: HashMap<String, String> = HashMap::new();
+        for msg in &self.messages {
+            if let AnthropicMessageContentOwned::Blocks(ref blocks) = msg.content {
+                for block in blocks {
+                    if let AnthropicContentBlockOwned::ToolUse { id, name, .. } = block {
+                        tool_use_name_map.insert(id.clone(), name.clone());
+                    }
+                }
+            }
+        }
+
         let mut input_messages: Vec<InputMessage> = Vec::with_capacity(self.messages.len());
         for msg in self.messages {
             let role = match msg.role {
@@ -883,7 +896,9 @@ impl AnthropicMessagesParams {
                 AnthropicMessageContentOwned::String(s) => {
                     vec![InputMessageContent::Text(Text { text: s })]
                 }
-                AnthropicMessageContentOwned::Blocks(blocks) => blocks_into_input_content(blocks)?,
+                AnthropicMessageContentOwned::Blocks(blocks) => {
+                    blocks_into_input_content(blocks, &tool_use_name_map)?
+                }
             };
 
             input_messages.push(InputMessage { role, content });
@@ -1048,6 +1063,7 @@ impl AnthropicMessagesParams {
 /// Converts a list of Anthropic content blocks to TensorZero `InputMessageContent` items.
 fn blocks_into_input_content(
     blocks: Vec<AnthropicContentBlockOwned>,
+    tool_use_name_map: &HashMap<String, String>,
 ) -> Result<Vec<InputMessageContent>, Error> {
     let mut result = Vec::with_capacity(blocks.len());
     for block in blocks {
@@ -1109,9 +1125,14 @@ fn blocks_into_input_content(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
+                // Look up tool name from earlier tool_use blocks in the conversation
+                let name = tool_use_name_map
+                    .get(tool_use_id.as_str())
+                    .cloned()
+                    .unwrap_or_default();
                 result.push(InputMessageContent::ToolResult(ToolResult {
-                    id: tool_use_id,
-                    name: String::new(), // Tool name not available in result block
+                    id: tool_use_id.clone(),
+                    name,
                     result: result_text,
                 }));
             }
@@ -1595,6 +1616,38 @@ mod tests {
                 assert_eq!(tc.arguments, r#"{"location":"NYC"}"#);
             }
             other => panic!("Expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_try_into_params_tool_result_resolves_name() {
+        // Simulates a full conversation: assistant calls tool, user returns result.
+        // The tool_use_id in the result should resolve to the tool name from the
+        // earlier tool_use block.
+        let json = r#"{
+            "model": "my_function",
+            "messages": [
+                {"role": "user", "content": "What's the weather in NYC?"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "tu1", "name": "get_weather", "input": {"location": "NYC"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": "Sunny, 72F"}]}
+            ],
+            "max_tokens": 100
+        }"#;
+        let params: AnthropicMessagesParams = serde_json::from_str(json).unwrap();
+        let internal = params.try_into_params().unwrap();
+
+        // Message 0: user text
+        assert_eq!(internal.input.messages[0].content.len(), 1);
+        // Message 1: assistant tool_use
+        assert_eq!(internal.input.messages[1].content.len(), 1);
+        // Message 2: user tool_result — should have resolved name
+        match &internal.input.messages[2].content[0] {
+            InputMessageContent::ToolResult(tr) => {
+                assert_eq!(tr.id, "tu1");
+                assert_eq!(tr.name, "get_weather");
+                assert_eq!(tr.result, "Sunny, 72F");
+            }
+            other => panic!("Expected ToolResult, got {other:?}"),
         }
     }
 
