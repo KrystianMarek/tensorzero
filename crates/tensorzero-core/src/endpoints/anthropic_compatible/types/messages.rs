@@ -4,9 +4,9 @@
 //! These types mirror the outbound types in `providers/anthropic.rs` but use owned data
 //! (`String` instead of `&'a str`) and are suitable for Axum request body deserialization.
 //!
-//! The request-to-internal translation logic lives in the separate `Params::try_from_anthropic`
-//! implementation (task tensorzero-s4w). This module provides the type definitions and
-//! a stub translation function.
+//! The request-to-internal translation logic lives in
+//! `AnthropicMessagesParams::try_into_params()` (this file, `impl` block).
+//! The response-to-Anthropic translation lives in `inference_response_to_anthropic()`.
 
 use serde::{Deserialize, Serialize, de::Error as _};
 use serde_json::Value;
