@@ -792,13 +792,16 @@ fn chat_output_to_anthropic_block(block: ContentBlockChatOutput) -> AnthropicRes
             signature: thought.signature.unwrap_or_default(),
         },
         ContentBlockChatOutput::Unknown(unknown) => {
-            // Try to extract data if it looks like redacted thinking
+            // RedactedThinking from Anthropic arrives as a JSON string.
+            // For other Unknown data shapes (e.g. future tool types), emit as
+            // Text so the data is visible instead of being misclassified.
             if let Value::String(data) = &unknown.data {
                 AnthropicResponseContentBlock::RedactedThinking { data: data.clone() }
             } else {
-                // Wrap back as a string
-                let data_str = unknown.data.to_string();
-                AnthropicResponseContentBlock::RedactedThinking { data: data_str }
+                AnthropicResponseContentBlock::Text {
+                    text: unknown.data.to_string(),
+                    cache_control: None,
+                }
             }
         }
     }
@@ -1652,7 +1655,9 @@ mod tests {
     #[test]
     fn test_inference_response_to_anthropic_stop_reason() {
         use crate::endpoints::inference::{InferenceOutput, InferenceResponse};
-        use tensorzero_types::{ChatInferenceResponse, ContentBlockChatOutput, FinishReason, Text, Usage};
+        use tensorzero_types::{
+            ChatInferenceResponse, ContentBlockChatOutput, FinishReason, Text, Usage,
+        };
         use tensorzero_types_providers::anthropic::AnthropicStopReason;
 
         let build_output = |finish_reason: Option<FinishReason>| {
@@ -1720,5 +1725,66 @@ mod tests {
         // None → None
         let resp = inference_response_to_anthropic(build_output(None), model_prefix).unwrap();
         assert_eq!(resp.stop_reason, None);
+    }
+
+    #[test]
+    fn test_inference_response_to_anthropic_unknown_block_handling() {
+        use crate::endpoints::inference::{InferenceOutput, InferenceResponse};
+        use tensorzero_types::{ChatInferenceResponse, Unknown};
+
+        let build_output = |content: Vec<ContentBlockChatOutput>| {
+            InferenceOutput::NonStreaming(InferenceResponse::Chat(ChatInferenceResponse {
+                inference_id: uuid::Uuid::default(),
+                episode_id: uuid::Uuid::default(),
+                variant_name: "test_variant".to_string(),
+                content,
+                usage: Usage::default(),
+                raw_usage: None,
+                original_response: None,
+                raw_response: None,
+                finish_reason: Some(FinishReason::Stop),
+            }))
+        };
+
+        let model_prefix = "tensorzero::function_name::my_function::variant_name::";
+
+        // String data Unknown → RedactedThinking
+        let resp = inference_response_to_anthropic(
+            build_output(vec![ContentBlockChatOutput::Unknown(Unknown {
+                data: Value::String("encrypted-data-here".to_string()),
+                model_name: None,
+                provider_name: None,
+            })]),
+            model_prefix,
+        )
+        .unwrap();
+        assert_eq!(resp.content.len(), 1);
+        match &resp.content[0] {
+            AnthropicResponseContentBlock::RedactedThinking { data } => {
+                assert_eq!(data, "encrypted-data-here");
+            }
+            other => panic!("Expected RedactedThinking, got {other:?}"),
+        }
+
+        // Object data Unknown → Text (not RedactedThinking)
+        let resp = inference_response_to_anthropic(
+            build_output(vec![ContentBlockChatOutput::Unknown(Unknown {
+                data: Value::Object(serde_json::Map::from_iter([
+                    ("type".to_string(), Value::String("tool_use".to_string())),
+                    ("id".to_string(), Value::String("tool_123".to_string())),
+                ])),
+                model_name: None,
+                provider_name: None,
+            })]),
+            model_prefix,
+        )
+        .unwrap();
+        assert_eq!(resp.content.len(), 1);
+        match &resp.content[0] {
+            AnthropicResponseContentBlock::Text { text, .. } => {
+                assert!(text.contains("tool_use"));
+            }
+            other => panic!("Expected Text, got {other:?}"),
+        }
     }
 }
