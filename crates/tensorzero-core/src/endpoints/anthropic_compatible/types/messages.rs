@@ -734,10 +734,22 @@ pub fn inference_response_to_anthropic(
 
     let usage = usage_to_anthropic(&usage);
 
-    let stop_reason = finish_reason.and_then(|fr| match fr {
-        FinishReason::Stop => None,
-        _ => None,
-    });
+    let stop_reason = match finish_reason {
+        Some(FinishReason::Stop) => {
+            Some(tensorzero_types_providers::anthropic::AnthropicStopReason::EndTurn)
+        }
+        Some(FinishReason::Length) => {
+            Some(tensorzero_types_providers::anthropic::AnthropicStopReason::MaxTokens)
+        }
+        Some(FinishReason::ToolCall) => {
+            Some(tensorzero_types_providers::anthropic::AnthropicStopReason::ToolUse)
+        }
+        Some(FinishReason::StopSequence) => {
+            Some(tensorzero_types_providers::anthropic::AnthropicStopReason::StopSequence)
+        }
+        // ContentFilter and Unknown don't map to standard Anthropic stop_reason values
+        Some(_) | None => None,
+    };
 
     let model = if model_prefix.is_empty() {
         variant_name
@@ -1635,5 +1647,78 @@ mod tests {
                 .to_string()
                 .contains("Image and document content blocks are not yet supported")
         );
+    }
+
+    #[test]
+    fn test_inference_response_to_anthropic_stop_reason() {
+        use crate::endpoints::inference::{InferenceOutput, InferenceResponse};
+        use tensorzero_types::{ChatInferenceResponse, ContentBlockChatOutput, FinishReason, Text, Usage};
+        use tensorzero_types_providers::anthropic::AnthropicStopReason;
+
+        let build_output = |finish_reason: Option<FinishReason>| {
+            InferenceOutput::NonStreaming(InferenceResponse::Chat(ChatInferenceResponse {
+                inference_id: uuid::Uuid::default(),
+                episode_id: uuid::Uuid::default(),
+                variant_name: "test_variant".to_string(),
+                content: vec![ContentBlockChatOutput::Text(Text {
+                    text: "Hello".to_string(),
+                })],
+                usage: Usage::default(),
+                raw_usage: None,
+                original_response: None,
+                raw_response: None,
+                finish_reason,
+            }))
+        };
+
+        let model_prefix = "tensorzero::function_name::my_function::variant_name::";
+
+        // Stop → EndTurn
+        let resp =
+            inference_response_to_anthropic(build_output(Some(FinishReason::Stop)), model_prefix)
+                .unwrap();
+        assert_eq!(resp.stop_reason, Some(AnthropicStopReason::EndTurn));
+
+        // Length → MaxTokens
+        let resp =
+            inference_response_to_anthropic(build_output(Some(FinishReason::Length)), model_prefix)
+                .unwrap();
+        assert_eq!(resp.stop_reason, Some(AnthropicStopReason::MaxTokens));
+
+        // ToolCall → ToolUse
+        let resp = inference_response_to_anthropic(
+            build_output(Some(FinishReason::ToolCall)),
+            model_prefix,
+        )
+        .unwrap();
+        assert_eq!(resp.stop_reason, Some(AnthropicStopReason::ToolUse));
+
+        // StopSequence → StopSequence
+        let resp = inference_response_to_anthropic(
+            build_output(Some(FinishReason::StopSequence)),
+            model_prefix,
+        )
+        .unwrap();
+        assert_eq!(resp.stop_reason, Some(AnthropicStopReason::StopSequence));
+
+        // ContentFilter → None
+        let resp = inference_response_to_anthropic(
+            build_output(Some(FinishReason::ContentFilter)),
+            model_prefix,
+        )
+        .unwrap();
+        assert_eq!(resp.stop_reason, None);
+
+        // Unknown → None
+        let resp = inference_response_to_anthropic(
+            build_output(Some(FinishReason::Unknown)),
+            model_prefix,
+        )
+        .unwrap();
+        assert_eq!(resp.stop_reason, None);
+
+        // None → None
+        let resp = inference_response_to_anthropic(build_output(None), model_prefix).unwrap();
+        assert_eq!(resp.stop_reason, None);
     }
 }
