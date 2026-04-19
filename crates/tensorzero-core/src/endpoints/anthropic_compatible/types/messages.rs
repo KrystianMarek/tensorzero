@@ -30,7 +30,9 @@ use tensorzero_types::message::InputMessage;
 use tensorzero_types::message::InputMessageContent;
 use tensorzero_types::role::Role;
 use tensorzero_types::tool::{ToolCall, ToolCallWrapper, ToolResult};
-use tensorzero_types::{ContentBlockChatOutput, FinishReason, InferenceResponse, Usage};
+use tensorzero_types::{
+    ContentBlockChatOutput, FinishReason, InferenceResponse, JsonInferenceOutput, Usage,
+};
 use tensorzero_types_providers::anthropic::AnthropicStopReason;
 
 // ============================================================================
@@ -693,7 +695,8 @@ pub struct AnthropicResponseUsage {
 
 /// Converts an `InferenceOutput` into an `AnthropicResponse`.
 ///
-/// Only `Chat` responses are supported — `Json` responses will return an error.
+/// Converts both `Chat` and `Json` inference responses to Anthropic format.
+/// JSON responses are wrapped as a single text content block with the serialized JSON.
 pub fn inference_response_to_anthropic(
     output: crate::endpoints::inference::InferenceOutput,
     model_prefix: &str,
@@ -709,10 +712,35 @@ pub fn inference_response_to_anthropic(
                     chat.usage,
                     chat.finish_reason,
                 ),
-                InferenceResponse::Json(_) => {
-                    return Err(Error::new(ErrorDetails::InvalidRequest {
-                        message: "JSON inference responses are not yet supported via the Anthropic-compatible ingress.".to_string(),
-                    }));
+                InferenceResponse::Json(json) => {
+                    let text = match &json.output {
+                        JsonInferenceOutput { raw: Some(raw), .. } => raw.clone(),
+                        JsonInferenceOutput {
+                            parsed: Some(parsed),
+                            ..
+                        } => serde_json::to_string(parsed).unwrap_or_else(|_| parsed.to_string()),
+                        JsonInferenceOutput {
+                            raw: None,
+                            parsed: None,
+                        } => "null".to_string(),
+                    };
+                    return Ok(AnthropicResponse {
+                        id: format!("msg_{}", json.inference_id),
+                        response_type: "message".to_string(),
+                        role: "assistant".to_string(),
+                        content: vec![AnthropicResponseContentBlock::Text {
+                            text,
+                            cache_control: None,
+                        }],
+                        model: if model_prefix.is_empty() {
+                            json.variant_name.clone()
+                        } else {
+                            format!("{model_prefix}{}", json.variant_name)
+                        },
+                        stop_reason: None,
+                        stop_sequence: None,
+                        usage: usage_to_anthropic(&json.usage),
+                    });
                 }
             };
             (
@@ -2027,5 +2055,70 @@ mod tests {
             }
             other => panic!("Expected Text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_inference_response_to_anthropic_json_with_raw() {
+        use crate::endpoints::inference::{InferenceOutput, InferenceResponse};
+        use tensorzero_types::{JsonInferenceOutput, JsonInferenceResponse, Usage};
+
+        let response = InferenceResponse::Json(JsonInferenceResponse {
+            inference_id: Uuid::nil(),
+            episode_id: Uuid::nil(),
+            variant_name: "test_variant".to_string(),
+            output: JsonInferenceOutput {
+                raw: Some(r#"{"key":"value"}"#.to_string()),
+                parsed: Some(serde_json::json!({"key": "value"})),
+            },
+            usage: Usage::default(),
+            raw_usage: None,
+            original_response: None,
+            raw_response: None,
+            finish_reason: None,
+        });
+        let output = InferenceOutput::NonStreaming(response);
+        let resp = inference_response_to_anthropic(output, "tensorzero::").unwrap();
+
+        assert_eq!(resp.content.len(), 1);
+        match &resp.content[0] {
+            AnthropicResponseContentBlock::Text { text, .. } => {
+                assert_eq!(text, r#"{"key":"value"}"#);
+            }
+            other => panic!("Expected Text, got {other:?}"),
+        }
+        assert_eq!(resp.model, "tensorzero::test_variant");
+        assert!(resp.stop_reason.is_none());
+    }
+
+    #[test]
+    fn test_inference_response_to_anthropic_json_with_parsed() {
+        use crate::endpoints::inference::{InferenceOutput, InferenceResponse};
+        use tensorzero_types::{JsonInferenceOutput, JsonInferenceResponse, Usage};
+
+        let response = InferenceResponse::Json(JsonInferenceResponse {
+            inference_id: Uuid::nil(),
+            episode_id: Uuid::nil(),
+            variant_name: "json_func".to_string(),
+            output: JsonInferenceOutput {
+                raw: None,
+                parsed: Some(serde_json::json!({"count": 42})),
+            },
+            usage: Usage::default(),
+            raw_usage: None,
+            original_response: None,
+            raw_response: None,
+            finish_reason: None,
+        });
+        let output = InferenceOutput::NonStreaming(response);
+        let resp = inference_response_to_anthropic(output, "").unwrap();
+
+        assert_eq!(resp.content.len(), 1);
+        match &resp.content[0] {
+            AnthropicResponseContentBlock::Text { text, .. } => {
+                assert!(text.contains("42"));
+            }
+            other => panic!("Expected Text, got {other:?}"),
+        }
+        assert_eq!(resp.model, "json_func");
     }
 }
