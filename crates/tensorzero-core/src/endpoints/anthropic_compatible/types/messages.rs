@@ -8,10 +8,14 @@
 //! `AnthropicMessagesParams::try_into_params()` (this file, `impl` block).
 //! The response-to-Anthropic translation lives in `inference_response_to_anthropic()`.
 
+use mime::MediaType;
 use serde::{Deserialize, Serialize, de::Error as _};
 use serde_json::Value;
 use std::collections::HashMap;
+use url::Url;
 use uuid::Uuid;
+
+use crate::inference::types::{Base64File, File, UrlFile};
 
 use crate::cache::CacheParamsOptions;
 use crate::config::Namespace;
@@ -1148,14 +1152,75 @@ fn blocks_into_input_content(
                     result: result_text,
                 }));
             }
-            AnthropicContentBlockOwned::Image { .. }
-            | AnthropicContentBlockOwned::Document { .. } => {
-                // File content blocks (images/documents) — skip for now,
-                // these need file upload/download infrastructure.
-                // We return an error since these are commonly requested.
-                return Err(Error::new(ErrorDetails::InvalidRequest {
-                    message: "Image and document content blocks are not yet supported in the Anthropic-compatible ingress. Use the native TensorZero API for file-based inputs.".to_string(),
-                }));
+            AnthropicContentBlockOwned::Image { source, .. } => {
+                let file = match source {
+                    AnthropicImageSourceOwned::Base64 { media_type, data } => {
+                        let mime_type: MediaType = media_type.parse().map_err(|_| {
+                            Error::new(ErrorDetails::InvalidRequest {
+                                message: format!(
+                                    "Invalid MIME type in base64 image: `{media_type}`"
+                                ),
+                            })
+                        })?;
+                        File::Base64(
+                            Base64File::new(None, Some(mime_type), data.clone(), None, None)
+                                .map_err(|e| {
+                                    Error::new(ErrorDetails::InvalidRequest {
+                                        message: format!("Invalid base64 image data: {e}"),
+                                    })
+                                })?,
+                        )
+                    }
+                    AnthropicImageSourceOwned::Url { url } => {
+                        let parsed_url = Url::parse(&url).map_err(|_| {
+                            Error::new(ErrorDetails::InvalidRequest {
+                                message: format!("Invalid URL in image content block: `{url}`"),
+                            })
+                        })?;
+                        File::Url(UrlFile {
+                            url: parsed_url,
+                            mime_type: None,
+                            detail: None,
+                            filename: None,
+                        })
+                    }
+                };
+                result.push(InputMessageContent::File(file));
+            }
+            AnthropicContentBlockOwned::Document { source, .. } => {
+                let file = match source {
+                    AnthropicDocumentSourceOwned::Base64 { media_type, data } => {
+                        let mime_type: MediaType = media_type.parse().map_err(|_| {
+                            Error::new(ErrorDetails::InvalidRequest {
+                                message: format!(
+                                    "Invalid MIME type in base64 document: `{media_type}`"
+                                ),
+                            })
+                        })?;
+                        File::Base64(
+                            Base64File::new(None, Some(mime_type), data.clone(), None, None)
+                                .map_err(|e| {
+                                    Error::new(ErrorDetails::InvalidRequest {
+                                        message: format!("Invalid base64 document data: {e}"),
+                                    })
+                                })?,
+                        )
+                    }
+                    AnthropicDocumentSourceOwned::Url { url } => {
+                        let parsed_url = Url::parse(&url).map_err(|_| {
+                            Error::new(ErrorDetails::InvalidRequest {
+                                message: format!("Invalid URL in document content block: `{url}`"),
+                            })
+                        })?;
+                        File::Url(UrlFile {
+                            url: parsed_url,
+                            mime_type: None,
+                            detail: None,
+                            filename: None,
+                        })
+                    }
+                };
+                result.push(InputMessageContent::File(file));
             }
         }
     }
@@ -1719,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_into_params_image_content_error() {
+    fn test_try_into_params_image_content_block_base64() {
         let json = r#"{
             "model": "my_function",
             "messages": [{
@@ -1731,14 +1796,101 @@ mod tests {
             "max_tokens": 100
         }"#;
         let params: AnthropicMessagesParams = serde_json::from_str(json).unwrap();
-        let result = params.try_into_params();
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Image and document content blocks are not yet supported")
-        );
+        let result = params.try_into_params().unwrap();
+        let msg = &result.input.messages[0];
+        assert_eq!(msg.content.len(), 1);
+        match &msg.content[0] {
+            InputMessageContent::File(file) => match file {
+                File::Base64(b64) => {
+                    assert_eq!(b64.mime_type.to_string(), "image/png");
+                    assert_eq!(b64.data(), "abc");
+                }
+                other => panic!("Expected File::Base64, got {other:?}"),
+            },
+            other => panic!("Expected File variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_try_into_params_image_content_block_url() {
+        let json = r#"{
+            "model": "my_function",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "url", "url": "https://example.com/image.png"}}
+                ]
+            }],
+            "max_tokens": 100
+        }"#;
+        let params: AnthropicMessagesParams = serde_json::from_str(json).unwrap();
+        let result = params.try_into_params().unwrap();
+        let msg = &result.input.messages[0];
+        assert_eq!(msg.content.len(), 1);
+        match &msg.content[0] {
+            InputMessageContent::File(file) => match file {
+                File::Url(url_file) => {
+                    assert_eq!(url_file.url.as_str(), "https://example.com/image.png");
+                }
+                other => panic!("Expected File::Url, got {other:?}"),
+            },
+            other => panic!("Expected File variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_try_into_params_document_content_block_base64() {
+        let json = r#"{
+            "model": "my_function",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "document", "source": {"type": "base64", "data": "def", "media_type": "application/pdf"}}
+                ]
+            }],
+            "max_tokens": 100
+        }"#;
+        let params: AnthropicMessagesParams = serde_json::from_str(json).unwrap();
+        let result = params.try_into_params().unwrap();
+        let msg = &result.input.messages[0];
+        assert_eq!(msg.content.len(), 1);
+        match &msg.content[0] {
+            InputMessageContent::File(file) => match file {
+                File::Base64(b64) => {
+                    assert_eq!(b64.mime_type.to_string(), "application/pdf");
+                    assert_eq!(b64.data(), "def");
+                }
+                other => panic!("Expected File::Base64, got {other:?}"),
+            },
+            other => panic!("Expected File variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_try_into_params_document_content_block_url() {
+        let json = r#"{
+            "model": "my_function",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "document", "source": {"type": "url", "url": "https://example.com/doc.pdf"}}
+                ]
+            }],
+            "max_tokens": 100
+        }"#;
+        let params: AnthropicMessagesParams = serde_json::from_str(json).unwrap();
+        let result = params.try_into_params().unwrap();
+        let msg = &result.input.messages[0];
+        assert_eq!(msg.content.len(), 1);
+        match &msg.content[0] {
+            InputMessageContent::File(file) => match file {
+                File::Url(url_file) => {
+                    assert_eq!(url_file.url.as_str(), "https://example.com/doc.pdf");
+                }
+                other => panic!("Expected File::Url, got {other:?}"),
+            },
+            other => panic!("Expected File variant, got {other:?}"),
+        }
     }
 
     #[test]
