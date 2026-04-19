@@ -1116,15 +1116,27 @@ fn blocks_into_input_content(
                 is_error: _,
                 ..
             } => {
-                // Concatenate tool result content blocks into a single string
-                let result_text = content
-                    .into_iter()
-                    .filter_map(|b| match b {
-                        AnthropicContentBlockOwned::Text { text, .. } => Some(text),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                // Concatenate tool result content blocks into a single string.
+                // Error on unsupported sub-block types instead of silently dropping.
+                let mut result_text = String::new();
+                for block in content {
+                    match block {
+                        AnthropicContentBlockOwned::Text { text, .. } => {
+                            if !result_text.is_empty() {
+                                result_text.push('\n');
+                            }
+                            result_text.push_str(&text);
+                        }
+                        other => {
+                            return Err(Error::new(ErrorDetails::InvalidRequest {
+                                message: format!(
+                                    "Unsupported content block type '{0}' inside tool_result; only Text blocks are supported",
+                                    other.kind()
+                                ),
+                            }));
+                        }
+                    }
+                }
                 // Look up tool name from earlier tool_use blocks in the conversation
                 let name = tool_use_name_map
                     .get(tool_use_id.as_str())
@@ -1663,6 +1675,30 @@ mod tests {
         let internal = params.try_into_params().unwrap();
 
         assert_eq!(internal.stream, Some(true));
+    }
+
+    #[test]
+    fn test_try_into_params_tool_result_non_text_error() {
+        // Non-text sub-blocks inside tool_result should return an error,
+        // not be silently dropped.
+        let json = r#"{
+            "model": "my_function",
+            "messages": [
+                {"role": "user", "content": "Check this"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "tu1", "name": "analyze", "input": {"field": "value"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": [{"type": "image", "source": {"type": "base64", "data": "abc", "media_type": "image/png"}}]}]}
+            ],
+            "max_tokens": 100
+        }"#;
+        let params: AnthropicMessagesParams = serde_json::from_str(json).unwrap();
+        let result = params.try_into_params();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported content block type 'image' inside tool_result")
+        );
     }
 
     #[test]
