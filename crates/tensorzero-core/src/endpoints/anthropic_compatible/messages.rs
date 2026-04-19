@@ -35,8 +35,10 @@ pub async fn messages_handler(
 ) -> Result<Response<Body>, AnthropicErrorResponse> {
     // Only non-streaming is supported for now
     if anthropic_params.stream {
-        return Err(AnthropicErrorResponse::bad_request_msg(
-            "Streaming is not yet supported via the Anthropic-compatible ingress.",
+        return Err(AnthropicErrorResponse::unimplemented(
+            AnthropicErrorBody::unimplemented(
+                "Streaming is not yet supported via the Anthropic-compatible ingress.",
+            ),
         ));
     }
 
