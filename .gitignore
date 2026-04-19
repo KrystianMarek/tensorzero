@@ -78,3 +78,6 @@ output
 .dolt/
 *.db
 .beads-credential-key
+
+# Claude Code session state
+.remember/

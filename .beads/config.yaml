@@ -53,4 +53,8 @@
 # - github.org
 # - github.repo
 
-sync.remote: "git+https://github.com/tensorzero/tensorzero.git"
+sync.remote: "git+https://github.com/KrystianMarek/tensorzero.git"
+
+dolt.auto-push: true
+
+sync.auto-sync: true
