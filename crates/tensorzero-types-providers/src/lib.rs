@@ -5,6 +5,7 @@
 //! See [`cache`] for a complete reference of which providers support prompt caching
 //! and how their API fields map to TensorZero's internal `Usage` struct.
 
+pub mod anthropic;
 pub mod aws_bedrock;
 pub mod cache;
 pub mod conversions;

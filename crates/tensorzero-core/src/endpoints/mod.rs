@@ -9,6 +9,7 @@ use crate::utils::gateway::SwappableAppStateData;
 use axum::routing::MethodRouter;
 use std::convert::Infallible;
 
+pub mod anthropic_compatible;
 pub mod batch_inference;
 pub mod datasets;
 pub mod embeddings;

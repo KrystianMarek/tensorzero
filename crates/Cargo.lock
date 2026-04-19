@@ -8297,6 +8297,7 @@ dependencies = [
 name = "tensorzero-types-providers"
 version = "2026.4.0"
 dependencies = [
+ "rust_decimal",
  "serde",
  "serde_json",
  "serde_path_to_error",
