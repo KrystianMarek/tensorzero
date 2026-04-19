@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "tensorzero",
+  "project_id": "7a0c3ebb-ac20-44e4-b119-d408f66a7679"
+}
