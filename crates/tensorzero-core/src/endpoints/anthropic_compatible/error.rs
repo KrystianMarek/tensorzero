@@ -191,6 +191,16 @@ impl From<Error> for AnthropicErrorResponse {
             StatusCode::SERVICE_UNAVAILABLE => {
                 Self::overloaded(AnthropicErrorBody::overloaded_error(message))
             }
+            StatusCode::NOT_IMPLEMENTED => {
+                Self::unimplemented(AnthropicErrorBody::unimplemented(message))
+            }
+            // Server errors — map to internal_error / api_error so SDKs retry appropriately
+            StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::REQUEST_TIMEOUT => {
+                Self::internal_error(AnthropicErrorBody::api_error(message))
+            }
+            // Everything else — client input errors
             _ => Self::bad_request(AnthropicErrorBody::invalid_request(message)),
         }
     }
@@ -205,6 +215,7 @@ impl axum::response::IntoResponse for AnthropicErrorResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorDetails;
     use serde_json::json;
 
     #[test]
@@ -234,5 +245,35 @@ mod tests {
     fn test_unimplemented_error() {
         let body = AnthropicErrorBody::unimplemented("not yet");
         assert_eq!(body.error.r#type, Some("not_implemented_error"));
+    }
+
+    #[test]
+    fn test_from_error_server_error_maps_to_500() {
+        let error = Error::new(ErrorDetails::InternalError {
+            message: "something broke".to_string(),
+        });
+        let response: AnthropicErrorResponse = error.into();
+        assert_eq!(response.1, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.0.error.r#type, Some("api_error"));
+    }
+
+    #[test]
+    fn test_from_error_not_implemented_maps_to_501() {
+        let error = Error::new(ErrorDetails::NotImplemented {
+            message: "not yet done".to_string(),
+        });
+        let response: AnthropicErrorResponse = error.into();
+        assert_eq!(response.1, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(response.0.error.r#type, Some("not_implemented_error"));
+    }
+
+    #[test]
+    fn test_from_error_client_error_remains_400() {
+        let error = Error::new(ErrorDetails::InvalidRequest {
+            message: "bad field".to_string(),
+        });
+        let response: AnthropicErrorResponse = error.into();
+        assert_eq!(response.1, StatusCode::BAD_REQUEST);
+        assert_eq!(response.0.error.r#type, Some("invalid_request_error"));
     }
 }
