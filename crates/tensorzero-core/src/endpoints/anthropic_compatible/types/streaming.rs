@@ -224,16 +224,25 @@ pub struct AnthropicStreamState {
     current_block_kind: BlockKind,
     /// Monotonically increasing block index across all emitted blocks.
     current_block_index: usize,
+    /// Key identifying the current open block (to handle parallel tool calls, multi-turn, etc.).
+    /// `None` means text/thought/unknown blocks (a single global block per kind).
+    current_block_key: Option<String>,
     /// Mapping from tool call ID to block index (for tool_use).
     tool_id_to_index: HashMap<String, usize>,
     /// Total number of distinct blocks emitted so far.
     total_blocks: usize,
+    /// Counter for generating unique block IDs.
+    block_id_counter: usize,
     /// Aggregated usage accumulated across all chunks.
     aggregated_usage: Usage,
     /// Signature from the Thought chunk (emitted with content_block_stop for thinking blocks).
     thinking_signature: Option<String>,
     /// Finish reason from the last processed chunk.
     last_finish_reason: Option<tensorzero_types::FinishReason>,
+    /// Whether message_start has already been emitted.
+    started: bool,
+    /// Whether we currently have an open block.
+    has_active_block: bool,
 }
 
 impl AnthropicStreamState {
@@ -270,7 +279,8 @@ impl AnthropicStreamState {
         let mut events = Vec::new();
 
         // Emit message_start on the very first chunk.
-        if events.is_empty() {
+        if !self.started {
+            self.started = true;
             events.push(AnthropicStreamMessage::MessageStart {
                 id: format!("msg_{inference_id}"),
                 response_type: "message".to_string(),
@@ -288,90 +298,142 @@ impl AnthropicStreamState {
         events
     }
 
+    /// Returns the block key for a given chunk.
+    ///
+    /// For tool calls, the key includes the tool ID so that parallel tool calls
+    /// in the same response each get their own block. For text/thought/unknown
+    /// blocks, we return None — these are tracked as a single global block per
+    /// message (new blocks of the same kind just replace the previous one).
+    fn block_key_for_chunk(chunk: &ContentBlockChunk) -> Option<String> {
+        match chunk {
+            ContentBlockChunk::ToolCall(t) => Some(format!("tool_{}", t.id)),
+            ContentBlockChunk::Text(_) => None,
+            ContentBlockChunk::Thought(_) => None,
+            ContentBlockChunk::Unknown(_) => None,
+        }
+    }
+
     /// Ensures the correct block is open for the given content block chunk.
     /// Emits block start/stop/delta events as needed.
     fn ensure_block(
         &mut self,
         block: &ContentBlockChunk,
-        inference_id: &str,
+        _inference_id: &str,
         _model: &str,
     ) -> Vec<AnthropicStreamMessage> {
         let mut events = Vec::new();
         let new_kind = BlockKind::from_chunk(block);
+        let new_key = Self::block_key_for_chunk(block);
 
-        let kind_mismatch = match (self.current_block_kind, new_kind) {
-            (BlockKind::None, _) => true,
-            (old, new) => old != new,
+        // Close the current block if the kind or key differs.
+        // For non-tool blocks (None keys), only kind comparison matters.
+        // For tool blocks, both kind and key must match to be the same block.
+        let key_mismatch = match (&new_key, &self.current_block_key) {
+            (Some(new_k), Some(cur_k)) => new_k != cur_k,
+            _ => false, // Non-tool blocks only use kind comparison.
         };
-
-        // Close the current block if it's different from the new one.
-        if kind_mismatch && !matches!(self.current_block_kind, BlockKind::None) {
+        if self.has_active_block && (new_kind != self.current_block_kind || key_mismatch) {
             events.push(AnthropicStreamMessage::ContentBlockStop {
                 index: self.current_block_index,
             });
+            self.current_block_kind = BlockKind::None;
+            self.has_active_block = false;
         }
 
-        // Open a new block if this is the first chunk for this block kind.
-        if matches!(self.current_block_kind, BlockKind::None) {
-            let block_id = block_id_from_chunk(block, inference_id);
-            let index = self.total_blocks;
-            self.total_blocks += 1;
-
+        // Open a new block.
+        if !self.has_active_block {
             match new_kind {
                 BlockKind::Thinking => {
-                    self.current_block_kind = BlockKind::Thinking;
                     let (thinking, thinking_sig) = extract_thought_fields(block);
+                    self.current_block_key = None;
                     self.thinking_signature.clone_from(&thinking_sig);
+                    let idx = self.total_blocks;
+                    self.total_blocks += 1;
+                    let id = format!("block_{}", self.block_id_counter);
+                    self.block_id_counter += 1;
+                    self.current_block_index = idx;
+                    self.current_block_kind = BlockKind::Thinking;
+                    self.has_active_block = true;
                     events.push(AnthropicStreamMessage::ContentBlockStart {
-                        index,
+                        index: idx,
                         content_type: "thinking".to_string(),
-                        id: block_id,
+                        id,
                         thinking,
                         signature: thinking_sig,
                         name: None,
                     });
                 }
                 BlockKind::RedactedThinking => {
-                    self.current_block_kind = BlockKind::RedactedThinking;
                     let data = extract_unknown_data(block);
+                    self.current_block_key = None;
+                    let idx = self.total_blocks;
+                    self.total_blocks += 1;
+                    let id = format!("block_{}", self.block_id_counter);
+                    self.block_id_counter += 1;
+                    self.current_block_index = idx;
+                    self.current_block_kind = BlockKind::RedactedThinking;
+                    self.has_active_block = true;
                     events.push(AnthropicStreamMessage::ContentBlockStart {
-                        index,
+                        index: idx,
                         content_type: "redacted_thinking".to_string(),
-                        id: block_id,
+                        id,
                         thinking: Some(data),
                         signature: None,
                         name: None,
                     });
                 }
                 BlockKind::Text => {
+                    self.current_block_key = None;
+                    let idx = self.total_blocks;
+                    self.total_blocks += 1;
+                    let id = format!("block_{}", self.block_id_counter);
+                    self.block_id_counter += 1;
+                    self.current_block_index = idx;
                     self.current_block_kind = BlockKind::Text;
+                    self.has_active_block = true;
                     events.push(AnthropicStreamMessage::ContentBlockStart {
-                        index,
+                        index: idx,
                         content_type: "text".to_string(),
-                        id: block_id,
+                        id,
                         thinking: None,
                         signature: None,
                         name: None,
                     });
                 }
                 BlockKind::ToolCall => {
-                    self.current_block_kind = BlockKind::ToolCall;
+                    self.current_block_key = new_key;
                     let (id, name, input) = extract_toolcall_fields(block);
+                    // Reuse existing index if the same tool_id was seen before,
+                    // otherwise allocate a new one.
+                    let idx = match self.tool_id_to_index.get(&id) {
+                        Some(&i) => i,
+                        None => {
+                            let i = self.total_blocks;
+                            self.total_blocks += 1;
+                            self.tool_id_to_index.insert(id.clone(), i);
+                            i
+                        }
+                    };
+                    self.current_block_index = idx;
+                    self.current_block_kind = BlockKind::ToolCall;
+                    self.has_active_block = true;
+                    let id = format!("block_{}", self.block_id_counter);
+                    self.block_id_counter += 1;
                     events.push(AnthropicStreamMessage::ContentBlockStart {
-                        index,
+                        index: idx,
                         content_type: "tool_use".to_string(),
-                        id: id.clone(),
+                        id,
                         thinking: None,
                         signature: None,
                         name: Some(name.clone()),
                     });
-                    self.tool_id_to_index.insert(id, index);
+                    // Tool call: emit start + delta together.
                     events.push(AnthropicStreamMessage::ContentBlockDelta {
-                        index,
+                        index: idx,
                         delta_type: "input_json_delta".to_string(),
                         text: None,
                         tool_use_id: None,
-                        name: None,
+                        name: Some(name),
                         input,
                     });
                     return events;
@@ -383,7 +445,6 @@ impl AnthropicStreamState {
         // Emit delta for the current open block.
         match new_kind {
             BlockKind::Thinking => {
-                self.current_block_kind = BlockKind::Thinking;
                 let (thinking, signature) = extract_thought_fields(block);
                 if let Some(sig) = signature {
                     self.thinking_signature = Some(sig);
@@ -398,7 +459,6 @@ impl AnthropicStreamState {
                 });
             }
             BlockKind::RedactedThinking => {
-                self.current_block_kind = BlockKind::RedactedThinking;
                 let data = extract_unknown_data(block);
                 events.push(AnthropicStreamMessage::ContentBlockDelta {
                     index: self.current_block_index,
@@ -410,7 +470,6 @@ impl AnthropicStreamState {
                 });
             }
             BlockKind::Text => {
-                self.current_block_kind = BlockKind::Text;
                 let text = extract_text(block);
                 events.push(AnthropicStreamMessage::ContentBlockDelta {
                     index: self.current_block_index,
@@ -422,7 +481,6 @@ impl AnthropicStreamState {
                 });
             }
             BlockKind::ToolCall => {
-                self.current_block_kind = BlockKind::ToolCall;
                 let (id, name, input) = extract_toolcall_fields(block);
                 let index = match self.tool_id_to_index.get(&id) {
                     Some(&idx) => idx,
@@ -501,15 +559,6 @@ pub fn finish_reason_to_anthropic_stop_reason(
 // =============================================================================
 // Chunk extraction helpers
 // =============================================================================
-
-fn block_id_from_chunk(chunk: &ContentBlockChunk, inference_id: &str) -> String {
-    match chunk {
-        ContentBlockChunk::Text(t) => format!("{inference_id}-text-{}", t.id),
-        ContentBlockChunk::ToolCall(t) => format!("{inference_id}-tool_use-{}", t.id),
-        ContentBlockChunk::Thought(t) => format!("{inference_id}-thinking-{}", t.id),
-        ContentBlockChunk::Unknown(t) => format!("{inference_id}-thinking-{}", t.id),
-    }
-}
 
 fn extract_text(chunk: &ContentBlockChunk) -> Option<String> {
     match chunk {
@@ -784,5 +833,727 @@ impl Stream for AnthropicStreamAdapter {
         } else {
             Poll::Ready(Some(self.buffer.pop().expect("buffer not empty")))
         }
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::endpoints::inference::ChatInferenceResponseChunk;
+    use crate::inference::types::streams::{ThoughtChunk, UnknownChunk};
+    use crate::inference::types::usage::Usage;
+    use crate::inference::types::{FinishReason, TextChunk};
+    use crate::tool::ToolCallChunk;
+    use googletest::prelude::*;
+    use tensorzero_types_providers::anthropic::AnthropicStopReason;
+
+    fn make_chat_chunk(
+        inference_id: Uuid,
+        episode_id: Uuid,
+        content: Vec<ContentBlockChunk>,
+        usage: Option<Usage>,
+        finish_reason: Option<FinishReason>,
+    ) -> InferenceResponseChunk {
+        InferenceResponseChunk::Chat(ChatInferenceResponseChunk {
+            inference_id,
+            episode_id,
+            variant_name: "test".to_string(),
+            content,
+            usage,
+            raw_usage: None,
+            raw_response: None,
+            finish_reason,
+            original_chunk: None,
+            raw_chunk: None,
+            aggregated_response: None,
+        })
+    }
+
+    fn assert_event_type(events: &[AnthropicStreamMessage], idx: usize, expected_type: &str) {
+        assert_json_type(events, idx, expected_type);
+    }
+
+    fn assert_json_type(
+        events: &[AnthropicStreamMessage],
+        idx: usize,
+        expected_type: &str,
+    ) -> serde_json::Value {
+        let event = &events[idx];
+        // Serialize to json via the same mechanism used in to_sse_event
+        match event {
+            AnthropicStreamMessage::MessageStart {
+                id,
+                response_type,
+                model,
+                stop_sequence,
+                usage,
+            } => {
+                let json = serde_json::json!({
+                    "id": id,
+                    "type": response_type,
+                    "model": model,
+                    "stop_sequence": stop_sequence,
+                    "usage": usage,
+                });
+                assert_eq!(
+                    response_type, expected_type,
+                    "event type mismatch at index {idx}"
+                );
+                json
+            }
+            AnthropicStreamMessage::ContentBlockStart {
+                index,
+                content_type,
+                id,
+                thinking,
+                signature,
+                name,
+            } => {
+                let json = serde_json::json!({
+                    "index": index,
+                    "type": content_type,
+                    "id": id,
+                    "thinking": thinking,
+                    "signature": signature,
+                    "name": name,
+                });
+                assert_eq!(
+                    content_type, expected_type,
+                    "event type mismatch at index {idx}"
+                );
+                json
+            }
+            AnthropicStreamMessage::ContentBlockDelta {
+                index,
+                delta_type,
+                text,
+                tool_use_id,
+                name,
+                input,
+            } => {
+                let json = serde_json::json!({
+                    "index": index,
+                    "type": delta_type,
+                    "text": text,
+                    "tool_use_id": tool_use_id,
+                    "name": name,
+                    "input": input,
+                });
+                assert_eq!(
+                    delta_type, expected_type,
+                    "event type mismatch at index {idx}"
+                );
+                json
+            }
+            AnthropicStreamMessage::ContentBlockStop { index } => {
+                assert_eq!(
+                    "content_block_stop", expected_type,
+                    "event type mismatch at index {idx}"
+                );
+                serde_json::json!({"index": index, "type": expected_type})
+            }
+            AnthropicStreamMessage::MessageDelta {
+                delta_type,
+                stop_reason,
+                stop_sequence,
+                usage,
+            } => {
+                let json = serde_json::json!({
+                    "type": delta_type,
+                    "stop_reason": stop_reason,
+                    "stop_sequence": stop_sequence,
+                    "usage": usage,
+                });
+                assert_eq!(
+                    delta_type, expected_type,
+                    "event type mismatch at index {idx}"
+                );
+                json
+            }
+            AnthropicStreamMessage::MessageStop => {
+                assert_eq!(
+                    "message_stop", expected_type,
+                    "event type mismatch at index {idx}"
+                );
+                serde_json::json!({})
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario 1: Text-only stream
+    // ---------------------------------------------------------------------------
+    #[gtest]
+    fn test_text_only_stream() {
+        let inference_id = Uuid::now_v7();
+        let episode_id = Uuid::now_v7();
+        let model = "test_model";
+        let mut state = AnthropicStreamState::default();
+
+        // Chunk 1: first text block starts.
+        let chunk = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Text(TextChunk {
+                id: "1".to_string(),
+                text: "Hello".to_string(),
+            })],
+            Some(Usage {
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                provider_cache_read_input_tokens: None,
+                provider_cache_write_input_tokens: None,
+                cost: None,
+            }),
+            None,
+        );
+
+        let events = state.process_chunk(&chunk, &inference_id.to_string(), model);
+        assert_eq!(
+            events.len(),
+            3,
+            "should emit message_start + content_block_start + content_block_delta"
+        );
+        assert_event_type(&events, 0, "message");
+        assert_event_type(&events, 1, "text");
+        assert_event_type(&events, 2, "text_delta");
+
+        // Chunk 2: text delta continues.
+        let chunk2 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Text(TextChunk {
+                id: "1".to_string(),
+                text: " World".to_string(),
+            })],
+            Some(Usage {
+                input_tokens: None,
+                output_tokens: Some(3),
+                provider_cache_read_input_tokens: None,
+                provider_cache_write_input_tokens: None,
+                cost: None,
+            }),
+            None,
+        );
+
+        let events2 = state.process_chunk(&chunk2, &inference_id.to_string(), model);
+        assert_eq!(events2.len(), 1, "should emit only content_block_delta");
+        assert_event_type(&events2, 0, "text_delta");
+
+        // Finalize.
+        let final_events = state.finalize();
+        assert_eq!(
+            final_events.len(),
+            2,
+            "should emit message_delta + message_stop"
+        );
+        assert_event_type(&final_events, 0, "message_delta");
+        assert_event_type(&final_events, 1, "message_stop");
+
+        // Check aggregated usage: 5 + 3 = 8 output tokens.
+        let message_delta = &final_events[0];
+        if let AnthropicStreamMessage::MessageDelta { usage, .. } = message_delta {
+            assert_eq!(
+                usage.output_tokens, 8,
+                "output tokens should be aggregated: 5 + 3"
+            );
+            assert_eq!(
+                usage.input_tokens, 10,
+                "input tokens should be accumulated (only first chunk has it)"
+            );
+        } else {
+            panic!("expected MessageDelta");
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario 2: Tool-only stream (one tool call)
+    // ---------------------------------------------------------------------------
+    #[gtest]
+    fn test_tool_only_stream() {
+        let inference_id = Uuid::now_v7();
+        let episode_id = Uuid::now_v7();
+        let mut state = AnthropicStreamState::default();
+
+        let chunk = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::ToolCall(ToolCallChunk {
+                id: "tool_1".to_string(),
+                raw_name: Some("get_weather".to_string()),
+                raw_arguments: r#"{"location":"Tokyo"}"#.to_string(),
+            })],
+            None,
+            None,
+        );
+
+        let events = state.process_chunk(&chunk, &inference_id.to_string(), "test_model");
+        assert_eq!(
+            events.len(),
+            3,
+            "should emit content_block_start + input_json_delta (+ message_start was emitted first)"
+        );
+        // message_start is only emitted on first chunk (events.is_empty check inside process_chunk)
+        // Actually the first chunk always emits message_start, so:
+        // message_start, content_block_start, content_block_delta(input_json_delta)
+        assert_event_type(&events, 0, "message");
+        assert_event_type(&events, 1, "tool_use");
+        assert_event_type(&events, 2, "input_json_delta");
+
+        // Finalize without finish reason (no ToolCall finish reason since model hasn't stopped).
+        let final_events = state.finalize();
+        assert_eq!(final_events.len(), 2);
+        assert_event_type(&final_events, 0, "message_delta");
+        assert_event_type(&final_events, 1, "message_stop");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario 3: Mixed text → tool_use → text
+    // ---------------------------------------------------------------------------
+    #[gtest]
+    fn test_mixed_text_tool_use_text() {
+        let inference_id = Uuid::now_v7();
+        let episode_id = Uuid::now_v7();
+        let mut state = AnthropicStreamState::default();
+
+        // Chunk 1: initial text.
+        let chunk1 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Text(TextChunk {
+                id: "1".to_string(),
+                text: "Let me check.".to_string(),
+            })],
+            None,
+            None,
+        );
+        let events1 = state.process_chunk(&chunk1, &inference_id.to_string(), "model");
+        assert_eq!(events1.len(), 3); // message_start + block_start + delta
+        assert_event_type(&events1, 1, "text");
+
+        // Chunk 2: tool_use — closes text block, opens tool block.
+        let chunk2 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::ToolCall(ToolCallChunk {
+                id: "tool_1".to_string(),
+                raw_name: Some("search".to_string()),
+                raw_arguments: r#"{"query":"weather"}"#.to_string(),
+            })],
+            None,
+            None,
+        );
+        let events2 = state.process_chunk(&chunk2, &inference_id.to_string(), "model");
+        assert!(
+            events2.len() >= 2,
+            "should close text block and open tool block, got {events2:?}"
+        );
+        // Find the content_block_stop and check ordering
+        let has_stop = events2
+            .iter()
+            .any(|e| matches!(e, AnthropicStreamMessage::ContentBlockStop { .. }));
+        assert!(
+            has_stop,
+            "should have a content_block_stop closing text block"
+        );
+
+        // Chunk 3: more text after tool_use — closes tool block, opens new text block.
+        let chunk3 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Text(TextChunk {
+                id: "2".to_string(),
+                text: "Done!".to_string(),
+            })],
+            None,
+            None,
+        );
+        let events3 = state.process_chunk(&chunk3, &inference_id.to_string(), "model");
+        let has_tool_stop = events3
+            .iter()
+            .any(|e| matches!(e, AnthropicStreamMessage::ContentBlockStop { .. }));
+        assert!(
+            has_tool_stop,
+            "should close tool block before opening text block"
+        );
+
+        // Finalize: verify total blocks.
+        let final_events = state.finalize();
+        assert_event_type(&final_events, 0, "message_delta");
+        assert_event_type(&final_events, 1, "message_stop");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario 4: Thinking + text (reasoning models)
+    // ---------------------------------------------------------------------------
+    #[gtest]
+    fn test_thinking_then_text() {
+        let inference_id = Uuid::now_v7();
+        let episode_id = Uuid::now_v7();
+        let mut state = AnthropicStreamState::default();
+
+        // Chunk 1: thinking block.
+        let chunk1 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Thought(ThoughtChunk {
+                id: "1".to_string(),
+                text: Some("Let me think about this...".to_string()),
+                signature: Some("sig001".to_string()),
+                summary_id: None,
+                summary_text: None,
+                provider_type: None,
+                extra_data: None,
+            })],
+            None,
+            None,
+        );
+        let events1 = state.process_chunk(&chunk1, &inference_id.to_string(), "model");
+        assert!(events1.iter().any(|e| matches!(e, AnthropicStreamMessage::ContentBlockStart { content_type, .. } if content_type == "thinking")));
+
+        // Chunk 2: thinking delta — same block, new signature.
+        let chunk2 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Thought(ThoughtChunk {
+                id: "1".to_string(),
+                text: Some(" More thinking...".to_string()),
+                signature: Some("sig002".to_string()),
+                summary_id: None,
+                summary_text: None,
+                provider_type: None,
+                extra_data: None,
+            })],
+            None,
+            None,
+        );
+        let events2 = state.process_chunk(&chunk2, &inference_id.to_string(), "model");
+        let thinking_deltas: Vec<_> = events2.iter()
+            .filter(|e| matches!(e, AnthropicStreamMessage::ContentBlockDelta { delta_type, .. } if delta_type == "thinking_delta"))
+            .collect();
+        assert!(
+            !thinking_deltas.is_empty(),
+            "should emit thinking_delta for continuation"
+        );
+
+        // Chunk 3: text after thinking — should close thinking block.
+        let chunk3 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Text(TextChunk {
+                id: "2".to_string(),
+                text: "Here is my answer.".to_string(),
+            })],
+            None,
+            None,
+        );
+        let events3 = state.process_chunk(&chunk3, &inference_id.to_string(), "model");
+        let has_thinking_stop = events3
+            .iter()
+            .any(|e| matches!(e, AnthropicStreamMessage::ContentBlockStop { .. }));
+        assert!(
+            has_thinking_stop,
+            "should close thinking block before opening text block"
+        );
+
+        let text_starts = events3.iter()
+            .filter(|e| matches!(e, AnthropicStreamMessage::ContentBlockStart { content_type, .. } if content_type == "text"));
+        assert!(
+            text_starts.count() >= 1,
+            "should open text block after thinking"
+        );
+
+        // Finalize: finish reason should show up.
+        let finalizer = state;
+        let stop_events = finalizer.finalize();
+        assert_eq!(stop_events.len(), 2);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario 5: Empty content then finish
+    // ---------------------------------------------------------------------------
+    #[gtest]
+    fn test_empty_content_then_finish() {
+        let inference_id = Uuid::now_v7();
+        let episode_id = Uuid::now_v7();
+        let mut state = AnthropicStreamState::default();
+
+        // Chunk with empty content blocks and a finish reason.
+        let chunk = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![],
+            None,
+            Some(FinishReason::Stop),
+        );
+        let events = state.process_chunk(&chunk, &inference_id.to_string(), "model");
+        assert!(!events.is_empty(), "should emit at least message_start");
+        assert_event_type(&events, 0, "message");
+
+        let final_events = state.finalize();
+        assert_eq!(final_events.len(), 2);
+        assert_event_type(&final_events, 0, "message_delta");
+        assert_event_type(&final_events, 1, "message_stop");
+
+        // Stop reason should be EndTurn.
+        if let AnthropicStreamMessage::MessageDelta { stop_reason, .. } = &final_events[0] {
+            assert_eq!(*stop_reason, Some(AnthropicStopReason::EndTurn));
+        } else {
+            panic!("expected MessageDelta");
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario 6: Multiple tool_use blocks in parallel
+    // ---------------------------------------------------------------------------
+    #[gtest]
+    fn test_multiple_tool_use_blocks() {
+        let inference_id = Uuid::now_v7();
+        let episode_id = Uuid::now_v7();
+        let mut state = AnthropicStreamState::default();
+
+        // Chunk with two parallel tool calls.
+        let chunk = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![
+                ContentBlockChunk::ToolCall(ToolCallChunk {
+                    id: "tool_1".to_string(),
+                    raw_name: Some("search_1".to_string()),
+                    raw_arguments: r#"{"q":"weather"}"#.to_string(),
+                }),
+                ContentBlockChunk::ToolCall(ToolCallChunk {
+                    id: "tool_2".to_string(),
+                    raw_name: Some("search_2".to_string()),
+                    raw_arguments: r#"{"q":"news"}"#.to_string(),
+                }),
+            ],
+            None,
+            None,
+        );
+
+        let events = state.process_chunk(&chunk, &inference_id.to_string(), "model");
+        // message_start + tool_1 start + tool_1 delta + tool_1 stop + tool_2 start + tool_2 delta
+        assert_eq!(
+            events.len(),
+            6,
+            "should emit message_start + 2 tool_use blocks with deltas and block stop"
+        );
+
+        // Verify block indices are monotonic.
+        let starts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AnthropicStreamMessage::ContentBlockStart { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, vec![0, 1], "indices should be monotonic: 0, 1");
+
+        // Same tool ID should get same index.
+        // Send another chunk with the same tool_1.
+        let chunk2 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::ToolCall(ToolCallChunk {
+                id: "tool_1".to_string(),
+                raw_name: Some("search_1".to_string()),
+                raw_arguments: r#"{"q":"updated"}"#.to_string(),
+            })],
+            None,
+            None,
+        );
+        let events2 = state.process_chunk(&chunk2, &inference_id.to_string(), "model");
+        let delta_indices: Vec<_> = events2
+            .iter()
+            .filter_map(|e| match e {
+                AnthropicStreamMessage::ContentBlockDelta { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            delta_indices.iter().all(|&i| i == 0),
+            "same tool_id should reuse index 0, got deltas at indices {delta_indices:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario 7: Signature delta arriving separately from thinking delta
+    // ---------------------------------------------------------------------------
+    #[gtest]
+    fn test_separate_signature_delta() {
+        let inference_id = Uuid::now_v7();
+        let episode_id = Uuid::now_v7();
+        let mut state = AnthropicStreamState::default();
+
+        // Chunk 1: thinking without signature.
+        let chunk1 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Thought(ThoughtChunk {
+                id: "1".to_string(),
+                text: Some("Thinking...".to_string()),
+                signature: None,
+                summary_id: None,
+                summary_text: None,
+                provider_type: None,
+                extra_data: None,
+            })],
+            None,
+            None,
+        );
+        let events1 = state.process_chunk(&chunk1, &inference_id.to_string(), "model");
+        let start = events1.iter()
+            .find(|e| matches!(e, AnthropicStreamMessage::ContentBlockStart { content_type, .. } if content_type == "thinking"));
+        assert!(start.is_some(), "should start thinking block");
+
+        // Chunk 2: thinking with signature delta.
+        let chunk2 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Thought(ThoughtChunk {
+                id: "1".to_string(),
+                text: None, // no text, just signature.
+                signature: Some("sig-abc".to_string()),
+                summary_id: None,
+                summary_text: None,
+                provider_type: None,
+                extra_data: None,
+            })],
+            None,
+            None,
+        );
+        let events2 = state.process_chunk(&chunk2, &inference_id.to_string(), "model");
+        let thinking_delta = events2.iter()
+            .filter(|e| matches!(e, AnthropicStreamMessage::ContentBlockDelta { delta_type, .. } if delta_type == "thinking_delta"));
+        assert!(
+            thinking_delta.count() >= 1,
+            "should emit thinking_delta for the signature-only chunk"
+        );
+
+        // Chunk 3: another text block — should close thinking.
+        let chunk3 = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Text(TextChunk {
+                id: "2".to_string(),
+                text: "Answer.".to_string(),
+            })],
+            None,
+            None,
+        );
+        let events3 = state.process_chunk(&chunk3, &inference_id.to_string(), "model");
+        assert!(
+            events3
+                .iter()
+                .any(|e| matches!(e, AnthropicStreamMessage::ContentBlockStop { .. })),
+            "should close thinking block"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario 8: message_delta carries final accumulated usage
+    // ---------------------------------------------------------------------------
+    #[gtest]
+    fn test_accumulated_usage_in_message_delta() {
+        let inference_id = Uuid::now_v7();
+        let episode_id = Uuid::now_v7();
+        let mut state = AnthropicStreamState::default();
+
+        // Three chunks with increasing usage.
+        for i in 0..3u32 {
+            let chunk = make_chat_chunk(
+                inference_id,
+                episode_id,
+                vec![ContentBlockChunk::Text(TextChunk {
+                    id: "1".to_string(),
+                    text: format!("chunk {i}"),
+                })],
+                Some(Usage {
+                    input_tokens: Some(10),     // every chunk reports 10 input tokens
+                    output_tokens: Some(i + 1), // 1, 2, 3 output tokens
+                    provider_cache_read_input_tokens: Some(5),
+                    provider_cache_write_input_tokens: None,
+                    cost: None,
+                }),
+                Some(FinishReason::Stop),
+            );
+            state.process_chunk(&chunk, &inference_id.to_string(), "model");
+        }
+
+        let final_events = state.finalize();
+        if let AnthropicStreamMessage::MessageDelta {
+            usage, stop_reason, ..
+        } = &final_events[0]
+        {
+            // 10 + 10 + 10 = 30 input tokens accumulated.
+            assert_eq!(
+                usage.input_tokens, 30,
+                "input tokens should be fully accumulated"
+            );
+            // 1 + 2 + 3 = 6 output tokens.
+            assert_eq!(
+                usage.output_tokens, 6,
+                "output tokens should be summed to 6"
+            );
+            // Cache read: 5 + 5 + 5 = 15.
+            assert_eq!(
+                usage.cache_creation_input_tokens, None,
+                "no cache write tokens"
+            );
+            assert_eq!(
+                usage.cache_read_input_tokens,
+                Some(15),
+                "cache read tokens should be accumulated"
+            );
+            assert_eq!(
+                *stop_reason,
+                Some(AnthropicStopReason::EndTurn),
+                "stop_reason should be EndTurn"
+            );
+        } else {
+            panic!("expected MessageDelta");
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Scenario 9: RedactedThinking (Unknown) block
+    // ---------------------------------------------------------------------------
+    #[gtest]
+    fn test_redacted_thinking_block() {
+        let inference_id = Uuid::now_v7();
+        let episode_id = Uuid::now_v7();
+        let mut state = AnthropicStreamState::default();
+
+        let chunk = make_chat_chunk(
+            inference_id,
+            episode_id,
+            vec![ContentBlockChunk::Unknown(UnknownChunk {
+                id: "1".to_string(),
+                data: serde_json::json!("redacted reasoning content".to_string()),
+                model_name: None,
+                provider_name: None,
+            })],
+            None,
+            None,
+        );
+
+        let events = state.process_chunk(&chunk, &inference_id.to_string(), "model");
+        let thinking_start = events.iter()
+            .find(|e| matches!(e, AnthropicStreamMessage::ContentBlockStart { content_type, .. } if content_type == "redacted_thinking"));
+        assert!(
+            thinking_start.is_some(),
+            "should open redacted_thinking block"
+        );
+
+        let has_delta = events.iter()
+            .any(|e| matches!(e, AnthropicStreamMessage::ContentBlockDelta { delta_type, .. } if delta_type == "thinking_delta"));
+        assert!(has_delta, "should emit thinking_delta for redacted content");
     }
 }
