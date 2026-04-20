@@ -14,7 +14,7 @@
 //! ping (periodic keepalive)
 //! ```
 
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::Event;
 use futures::Stream;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -634,21 +634,19 @@ impl InferenceResponseChunk {
 /// Converts an internal `InferenceStream` into an Anthropic-compatible SSE stream.
 pub fn convert_to_anthropic_stream(
     stream: InferenceStream,
-    inference_id: uuid::Uuid,
     model: String,
-) -> Sse<impl Stream<Item = Result<Event, Error>>> {
-    let inner = AnthropicStreamAdapter {
+) -> impl Stream<Item = Result<Event, Error>> {
+    AnthropicStreamAdapter {
         inner: stream,
         state: AnthropicStreamState::default(),
-        inference_id_str: inference_id.to_string(),
+        inference_id_str: String::new(),
         model,
         is_first_chunk: true,
         event_id: 0,
         buffer: Vec::new(),
         json_text_id: None,
         finalized: false,
-    };
-    Sse::new(inner)
+    }
 }
 
 /// A stateful stream adapter that converts `InferenceStream` to Anthropic SSE events.
@@ -722,6 +720,14 @@ impl Stream for AnthropicStreamAdapter {
             }
             Poll::Pending => return Poll::Pending,
         };
+
+        // Extract inference_id from first chunk if not yet set.
+        if self.is_first_chunk
+            && self.inference_id_str.is_empty()
+            && let InferenceResponseChunk::Chat(chat) = &chunk
+        {
+            self.inference_id_str = chat.inference_id.to_string();
+        }
 
         let is_json = matches!(&chunk, InferenceResponseChunk::Json(_));
 
