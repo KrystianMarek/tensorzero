@@ -6,6 +6,7 @@
     clippy::unwrap_used
 )]
 mod aggregated_response;
+mod anthropic_compatible;
 mod best_of_n;
 mod built_in;
 mod cache;
