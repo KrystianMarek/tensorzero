@@ -7,6 +7,7 @@
 )]
 mod aggregated_response;
 mod anthropic_compatible;
+mod anthropic_compatible_streaming;
 mod best_of_n;
 mod built_in;
 mod cache;
