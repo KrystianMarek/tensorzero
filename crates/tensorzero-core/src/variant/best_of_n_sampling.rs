@@ -359,6 +359,7 @@ impl BestOfNSamplingConfig {
                 let config = InferenceConfig {
                     variant_name: Arc::from(candidate.as_str()),
                     extra_cache_key: Some(format!("candidate_{i}")),
+                    cache_control_spans: Vec::new(),
                     ..inference_config.as_ref().clone()
                 };
                 Ok((candidate.to_string(), variant.clone(), Arc::new(config)))
@@ -863,6 +864,7 @@ impl BestOfNEvaluatorConfig {
                     thinking_budget_tokens: inference_params.chat_completion.thinking_budget_tokens,
                     verbosity: inference_params.chat_completion.verbosity.clone(),
                 },
+                cache_control_spans: inference_config.cache_control_spans.clone(),
             },
             skipped_indices,
         ))
@@ -1506,6 +1508,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
 
         let selected = best_of_n_variant

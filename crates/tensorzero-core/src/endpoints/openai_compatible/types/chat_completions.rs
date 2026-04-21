@@ -488,6 +488,7 @@ impl Params {
             extra_headers: openai_compatible_params.tensorzero_extra_headers,
             internal_dynamic_variant_config: openai_compatible_params
                 .tensorzero_internal_dynamic_variant_config,
+            cache_control_spans: Vec::new(),
         })
     }
 }

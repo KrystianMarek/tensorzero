@@ -84,3 +84,20 @@ impl AnthropicStopReason {
         }
     }
 }
+
+/// Cache control marker for a content block or tool.
+///
+/// Anthropic supports `cache_control: { type: "ephemeral" }` on individual
+/// content blocks, system blocks, and tool definitions.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct AnthropicCacheControl {
+    #[serde(rename = "type")]
+    pub cache_type: AnthropicCacheControlType,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicCacheControlType {
+    #[default]
+    Ephemeral,
+}

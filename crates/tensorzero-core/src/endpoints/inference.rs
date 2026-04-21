@@ -160,6 +160,8 @@ pub struct Params {
     pub extra_headers: UnfilteredInferenceExtraHeaders,
     #[serde(default)]
     pub internal_dynamic_variant_config: Option<UninitializedVariantInfo>,
+    #[serde(default, skip_serializing)]
+    pub cache_control_spans: Vec<tensorzero_inference_types::CacheControlSpan>,
 }
 
 #[derive(Debug)]
@@ -555,6 +557,7 @@ pub async fn inference(
             include_raw_response: params.include_raw_response,
             include_raw_usage: params.include_raw_usage,
             include_aggregated_response: params.include_aggregated_response,
+            cache_control_spans: &params.cache_control_spans,
         }))
         .await?;
         return Ok(InferenceOutputData {
@@ -617,6 +620,7 @@ pub async fn inference(
             include_raw_response: params.include_raw_response,
             include_raw_usage: params.include_raw_usage,
             include_aggregated_response: params.include_aggregated_response,
+            cache_control_spans: &params.cache_control_spans,
         }))
         .await;
 
@@ -780,6 +784,7 @@ struct InferVariantArgs<'a> {
     include_raw_response: bool,
     include_raw_usage: bool,
     include_aggregated_response: bool,
+    cache_control_spans: &'a Vec<tensorzero_inference_types::CacheControlSpan>,
 }
 
 async fn infer_variant(args: InferVariantArgs<'_>) -> Result<InferenceOutput, Error> {
@@ -811,6 +816,7 @@ async fn infer_variant(args: InferVariantArgs<'_>) -> Result<InferenceOutput, Er
         include_raw_response,
         include_raw_usage,
         include_aggregated_response,
+        cache_control_spans: _,
     } = args;
 
     // Will be edited by the variant as part of making the request so we must clone here
@@ -833,6 +839,7 @@ async fn infer_variant(args: InferVariantArgs<'_>) -> Result<InferenceOutput, Er
         extra_cache_key: None,
         extra_body: extra_body.clone(),
         extra_headers: extra_headers.clone(),
+        cache_control_spans: args.cache_control_spans.clone(),
     });
 
     if stream {

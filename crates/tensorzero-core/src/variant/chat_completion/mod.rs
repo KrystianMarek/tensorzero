@@ -1477,6 +1477,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let models = ModelTable::default();
         let inference_models = InferenceModels {
@@ -1542,6 +1543,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let result = chat_completion_config
             .infer(
@@ -1619,6 +1621,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let err = chat_completion_config
             .infer(
@@ -1724,6 +1727,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let result = chat_completion_config
             .infer(
@@ -1811,6 +1815,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let result = chat_completion_config
             .infer(
@@ -1912,6 +1917,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let inference_params = InferenceParams::default();
         let result = chat_completion_config
@@ -1995,6 +2001,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let chat_completion_config = UninitializedChatCompletionConfig {
             model: "json".into(),
@@ -2131,6 +2138,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let chat_completion_config = UninitializedChatCompletionConfig {
             model: "json".into(),
@@ -2255,6 +2263,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let chat_completion_config = UninitializedChatCompletionConfig {
             model: "json".into(),
@@ -2524,6 +2533,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let result = chat_completion_config
             .infer_stream(
@@ -2606,6 +2616,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let (mut stream, models_used) = chat_completion_config
             .infer_stream(
@@ -2715,6 +2726,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let inference_config_arc = Arc::new(inference_config);
         let model_request = chat_completion_config
@@ -2822,6 +2834,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let inference_config_arc = Arc::new(inference_config);
         let mut inference_params = InferenceParams::default();
@@ -2906,6 +2919,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let inference_config_arc = Arc::new(inference_config);
         let model_request = chat_completion_config

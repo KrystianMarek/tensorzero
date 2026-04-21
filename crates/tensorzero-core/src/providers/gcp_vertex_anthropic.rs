@@ -34,6 +34,7 @@ use crate::inference::types::{
 };
 use crate::model::CredentialLocationWithFallback;
 use crate::model::{ModelProviderRequestInfo, ProviderInferenceRequest};
+use tensorzero_inference_types::CacheControlTarget;
 
 use crate::model_table::{GCPVertexAnthropicKind, ProviderType, ProviderTypeDefaultCredentials};
 use crate::providers::anthropic::{
@@ -554,13 +555,27 @@ impl<'a> GCPVertexAnthropicRequestBody<'a> {
         };
         // We use the content block form rather than string so people can use
         // extra_body for cache control.
-        let system = request
-            .system
-            .as_deref()
-            .map(|text| vec![AnthropicSystemBlock::Text { text }]);
+        let system = request.system.as_deref().map(|text| {
+            let cache_control = request.cache_control_spans.iter().find_map(|span| {
+                if let CacheControlTarget::SystemBlock { block_idx: 0 } = span.target {
+                    return Some(span.marker.clone());
+                }
+                None
+            });
+            vec![AnthropicSystemBlock::Text {
+                text,
+                cache_control,
+            }]
+        });
         let messages: Vec<AnthropicMessage> =
-            try_join_all(request.messages.iter().map(|m| {
-                AnthropicMessage::from_request_message(m, messages_config, PROVIDER_TYPE)
+            try_join_all(request.messages.iter().enumerate().map(|(message_idx, m)| {
+                AnthropicMessage::from_request_message(
+                    m,
+                    message_idx,
+                    &request.cache_control_spans,
+                    messages_config,
+                    PROVIDER_TYPE,
+                )
             }))
             .await?
             .into_iter()
@@ -569,7 +584,12 @@ impl<'a> GCPVertexAnthropicRequestBody<'a> {
         warn_gcp_vertex_anthropic_json_mode(request.json_mode, &request.function_type);
 
         // GCP Vertex Anthropic doesn't support strict mode for tools
-        let tools = build_anthropic_tools(request.tool_config.as_ref(), provider_tools, false)?;
+        let tools = build_anthropic_tools(
+            request.tool_config.as_ref(),
+            provider_tools,
+            false,
+            &request.cache_control_spans,
+        )?;
 
         // `tool_choice` should only be set if tools are set and non-empty
         let tool_choice: Option<AnthropicToolChoice> = tools
@@ -909,7 +929,7 @@ mod tests {
             parameters: parameters.clone(),
             strict: false,
         };
-        let anthropic_tool: AnthropicFunctionTool = AnthropicFunctionTool::new(&tool, false);
+        let anthropic_tool: AnthropicFunctionTool = AnthropicFunctionTool::new(&tool, false, None);
         assert_eq!(
             anthropic_tool,
             AnthropicFunctionTool {
@@ -917,6 +937,7 @@ mod tests {
                 description: Some("test"),
                 input_schema: &parameters,
                 strict: None,
+                cache_control: None,
             }
         );
     }
@@ -929,6 +950,7 @@ mod tests {
         };
         let anthropic_content_block = AnthropicMessageContent::from_content_block(
             &text_content_block,
+            None,
             message_config,
             PROVIDER_TYPE,
         )
@@ -937,7 +959,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             anthropic_content_block,
-            FlattenUnknown::Normal(AnthropicMessageContent::Text { text: "test" })
+            FlattenUnknown::Normal(AnthropicMessageContent::Text {
+                text: "test",
+                cache_control: None,
+            })
         );
 
         let tool_call_content_block = ContentBlock::ToolCall(ToolCall {
@@ -947,6 +972,7 @@ mod tests {
         });
         let anthropic_content_block = AnthropicMessageContent::from_content_block(
             &tool_call_content_block,
+            None,
             message_config,
             PROVIDER_TYPE,
         )
@@ -958,7 +984,8 @@ mod tests {
             FlattenUnknown::Normal(AnthropicMessageContent::ToolUse {
                 id: "test_id",
                 name: "test_name",
-                input: json!({"type": "string"})
+                input: json!({"type": "string"}),
+                cache_control: None,
             })
         );
     }
@@ -1039,6 +1066,8 @@ mod tests {
                 messages: vec![
                     AnthropicMessage::from_request_message(
                         &messages[0],
+                        0,
+                        &[],
                         message_config,
                         PROVIDER_TYPE
                     )
@@ -1046,6 +1075,8 @@ mod tests {
                     .unwrap(),
                     AnthropicMessage::from_request_message(
                         &messages[1],
+                        1,
+                        &[],
                         message_config,
                         PROVIDER_TYPE
                     )
@@ -1055,7 +1086,8 @@ mod tests {
                 max_tokens: 32_000,
                 stream: Some(false),
                 system: Some(vec![AnthropicSystemBlock::Text {
-                    text: "test_system"
+                    text: "test_system",
+                    cache_control: None,
                 }]),
                 ..Default::default()
             }
@@ -1109,6 +1141,8 @@ mod tests {
                 messages: vec![
                     AnthropicMessage::from_request_message(
                         &messages[0],
+                        0,
+                        &[],
                         message_config,
                         PROVIDER_TYPE
                     )
@@ -1116,6 +1150,8 @@ mod tests {
                     .unwrap(),
                     AnthropicMessage::from_request_message(
                         &messages[1],
+                        1,
+                        &[],
                         message_config,
                         PROVIDER_TYPE
                     )
@@ -1123,6 +1159,8 @@ mod tests {
                     .unwrap(),
                     AnthropicMessage::from_request_message(
                         &messages[2],
+                        2,
+                        &[],
                         message_config,
                         PROVIDER_TYPE
                     )
@@ -1132,7 +1170,8 @@ mod tests {
                 max_tokens: 100,
                 stream: Some(true),
                 system: Some(vec![AnthropicSystemBlock::Text {
-                    text: "test_system"
+                    text: "test_system",
+                    cache_control: None,
                 }]),
                 temperature: Some(0.5),
                 top_p: Some(0.9),
@@ -1193,6 +1232,8 @@ mod tests {
                 messages: vec![
                     AnthropicMessage::from_request_message(
                         &messages[0],
+                        0,
+                        &[],
                         message_config,
                         PROVIDER_TYPE
                     )
@@ -1200,6 +1241,8 @@ mod tests {
                     .unwrap(),
                     AnthropicMessage::from_request_message(
                         &messages[1],
+                        1,
+                        &[],
                         message_config,
                         PROVIDER_TYPE
                     )
@@ -1207,6 +1250,8 @@ mod tests {
                     .unwrap(),
                     AnthropicMessage::from_request_message(
                         &messages[2],
+                        2,
+                        &[],
                         message_config,
                         PROVIDER_TYPE
                     )
@@ -1216,7 +1261,8 @@ mod tests {
                 max_tokens: 100,
                 stream: Some(true),
                 system: Some(vec![AnthropicSystemBlock::Text {
-                    text: "test_system"
+                    text: "test_system",
+                    cache_control: None,
                 }]),
                 temperature: Some(0.5),
                 top_p: Some(0.9),
@@ -1229,6 +1275,7 @@ mod tests {
                     description: Some(WEATHER_TOOL.description()),
                     input_schema: WEATHER_TOOL.parameters(),
                     strict: None,
+                    cache_control: None,
                 })]),
                 ..Default::default()
             }

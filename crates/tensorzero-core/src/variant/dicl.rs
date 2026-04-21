@@ -1467,6 +1467,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
 
         let mut inference_params = InferenceParams {
@@ -1598,6 +1599,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
 
         let mut inference_params = InferenceParams {

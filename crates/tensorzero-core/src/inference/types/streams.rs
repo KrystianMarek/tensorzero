@@ -703,6 +703,7 @@ pub async fn collect_chunks(args: CollectChunksArgs) -> Result<InferenceResult, 
         extra_body,
         extra_headers,
         extra_cache_key: None,
+        cache_control_spans: Vec::new(),
     };
     function
         .prepare_response(

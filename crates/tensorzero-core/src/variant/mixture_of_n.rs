@@ -522,6 +522,7 @@ impl MixtureOfNConfig {
                 let config = InferenceConfig {
                     variant_name: Arc::from(candidate.as_str()),
                     extra_cache_key: Some(format!("candidate_{i}")),
+                    cache_control_spans: Vec::new(),
                     ..inference_config.as_ref().clone()
                 };
                 Ok((candidate.to_string(), variant.clone(), Arc::new(config)))
@@ -1621,6 +1622,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
 
         let InferenceOrStreamResult::NonStream(fused) = mixture_of_n_variant

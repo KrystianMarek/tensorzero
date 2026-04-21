@@ -1018,6 +1018,7 @@ impl RateLimitedRequest for ModelInferenceRequest<'_> {
             extra_headers: _,
             extra_cache_key: _,
             inference_params_v2: _,
+            cache_control_spans: _,
         } = self;
 
         let tokens = if resources.contains(&RateLimitResource::Token) {

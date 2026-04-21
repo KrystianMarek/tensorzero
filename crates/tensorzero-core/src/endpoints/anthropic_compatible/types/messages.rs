@@ -25,6 +25,7 @@ use crate::error::{Error, ErrorDetails};
 use crate::inference::types::Input;
 use crate::inference::types::extra_body::UnfilteredInferenceExtraBody;
 use crate::inference::types::extra_headers::UnfilteredInferenceExtraHeaders;
+use tensorzero_inference_types::{CacheControlSpan, CacheControlTarget};
 use tensorzero_types::content::{System, Text, Thought, Unknown};
 use tensorzero_types::inference_params::ChatCompletionInferenceParams;
 use tensorzero_types::message::InputMessage;
@@ -32,7 +33,7 @@ use tensorzero_types::message::InputMessageContent;
 use tensorzero_types::role::Role;
 use tensorzero_types::tool::{ToolCall, ToolCallWrapper, ToolResult};
 use tensorzero_types::{ContentBlockChatOutput, InferenceResponse, JsonInferenceOutput, Usage};
-use tensorzero_types_providers::anthropic::AnthropicStopReason;
+use tensorzero_types_providers::anthropic::{AnthropicCacheControl, AnthropicStopReason};
 
 // ============================================================================
 // Top-level request body
@@ -123,7 +124,10 @@ impl Default for AnthropicSystem {
 /// Single content block within a system prompt.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AnthropicSystemContentBlockOwned {
-    Text { text: String },
+    Text {
+        text: String,
+        cache_control: Option<tensorzero_types_providers::anthropic::AnthropicCacheControl>,
+    },
 }
 
 impl AnthropicSystemContentBlockOwned {
@@ -134,11 +138,16 @@ impl AnthropicSystemContentBlockOwned {
             r#type: String,
             #[serde(default)]
             text: String,
+            #[serde(default)]
+            cache_control: Option<tensorzero_types_providers::anthropic::AnthropicCacheControl>,
         }
 
         let helper: Helper = serde_json::from_value(value)?;
         match helper.r#type.as_str() {
-            "text" => Ok(AnthropicSystemContentBlockOwned::Text { text: helper.text }),
+            "text" => Ok(AnthropicSystemContentBlockOwned::Text {
+                text: helper.text,
+                cache_control: helper.cache_control,
+            }),
             other => Err(serde_json::Error::custom(format!(
                 "Unknown system content block type: {other}"
             ))),
@@ -217,27 +226,27 @@ pub enum AnthropicRoleOwned {
 pub enum AnthropicContentBlockOwned {
     Text {
         text: String,
-        cache_control: Option<CacheControlOwned>,
+        cache_control: Option<AnthropicCacheControl>,
     },
     Image {
-        cache_control: Option<CacheControlOwned>,
+        cache_control: Option<AnthropicCacheControl>,
         source: AnthropicImageSourceOwned,
     },
     Document {
-        cache_control: Option<CacheControlOwned>,
+        cache_control: Option<AnthropicCacheControl>,
         source: AnthropicDocumentSourceOwned,
     },
     ToolUse {
         id: String,
         name: String,
         input: Value,
-        cache_control: Option<CacheControlOwned>,
+        cache_control: Option<AnthropicCacheControl>,
     },
     ToolResult {
         tool_use_id: String,
         content: Vec<AnthropicContentBlockOwned>,
         is_error: Option<bool>,
-        cache_control: Option<CacheControlOwned>,
+        cache_control: Option<AnthropicCacheControl>,
     },
     Thinking {
         thinking: String,
@@ -263,7 +272,7 @@ impl AnthropicContentBlockOwned {
                 struct TextBlock {
                     text: String,
                     #[serde(default)]
-                    cache_control: Option<CacheControlOwned>,
+                    cache_control: Option<AnthropicCacheControl>,
                 }
                 let block: TextBlock = serde_json::from_value(value)?;
                 Ok(AnthropicContentBlockOwned::Text {
@@ -275,7 +284,7 @@ impl AnthropicContentBlockOwned {
                 #[derive(Deserialize)]
                 struct ImageBlock {
                     #[serde(default)]
-                    cache_control: Option<CacheControlOwned>,
+                    cache_control: Option<AnthropicCacheControl>,
                     source: AnthropicImageSourceOwned,
                 }
                 let block: ImageBlock = serde_json::from_value(value)?;
@@ -288,7 +297,7 @@ impl AnthropicContentBlockOwned {
                 #[derive(Deserialize)]
                 struct DocumentBlock {
                     #[serde(default)]
-                    cache_control: Option<CacheControlOwned>,
+                    cache_control: Option<AnthropicCacheControl>,
                     source: AnthropicDocumentSourceOwned,
                 }
                 let block: DocumentBlock = serde_json::from_value(value)?;
@@ -304,7 +313,7 @@ impl AnthropicContentBlockOwned {
                     name: String,
                     input: Value,
                     #[serde(default)]
-                    cache_control: Option<CacheControlOwned>,
+                    cache_control: Option<AnthropicCacheControl>,
                 }
                 let block: ToolUseBlock = serde_json::from_value(value)?;
                 Ok(AnthropicContentBlockOwned::ToolUse {
@@ -323,7 +332,7 @@ impl AnthropicContentBlockOwned {
                     #[serde(default)]
                     is_error: Option<bool>,
                     #[serde(default)]
-                    cache_control: Option<CacheControlOwned>,
+                    cache_control: Option<AnthropicCacheControl>,
                 }
                 let block: ToolResultBlock = serde_json::from_value(value)?;
                 let content = if let Value::Array(items) = block.content {
@@ -388,27 +397,6 @@ impl AnthropicContentBlockOwned {
     }
 }
 
-/// Cache control marker for a content block.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct CacheControlOwned {
-    #[serde(rename = "type")]
-    cache_type: CacheControlType,
-}
-
-impl Default for CacheControlOwned {
-    fn default() -> Self {
-        Self {
-            cache_type: CacheControlType::Ephemeral,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum CacheControlType {
-    Ephemeral,
-}
-
 /// Image source for Anthropic image content blocks.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -440,7 +428,7 @@ pub struct AnthropicToolOwned {
     #[serde(default)]
     pub strict: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControlOwned>,
+    pub cache_control: Option<AnthropicCacheControl>,
 }
 
 /// Anthropic tool choice.
@@ -659,14 +647,14 @@ pub enum AnthropicResponseContentBlock {
     Text {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControlOwned>,
+        cache_control: Option<AnthropicCacheControl>,
     },
     ToolUse {
         id: String,
         name: String,
         input: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
-        cache_control: Option<CacheControlOwned>,
+        cache_control: Option<AnthropicCacheControl>,
     },
     Thinking {
         thinking: String,
@@ -864,6 +852,7 @@ impl AnthropicMessagesParams {
             };
 
         // --- System prompt ---
+        let mut system_spans: Vec<(usize, AnthropicCacheControl)> = Vec::new();
         let system = match self.system {
             AnthropicSystem::String(s) if !s.is_empty() => Some(System::Text(s)),
             AnthropicSystem::Blocks(blocks) => {
@@ -872,8 +861,17 @@ impl AnthropicMessagesParams {
                 } else {
                     let combined: String = blocks
                         .into_iter()
-                        .map(|b| match b {
-                            AnthropicSystemContentBlockOwned::Text { text } => text,
+                        .enumerate()
+                        .map(|(block_idx, b)| match b {
+                            AnthropicSystemContentBlockOwned::Text {
+                                text,
+                                cache_control,
+                            } => {
+                                if let Some(marker) = cache_control {
+                                    system_spans.push((block_idx, marker));
+                                }
+                                text
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -901,8 +899,9 @@ impl AnthropicMessagesParams {
             }
         }
 
+        let mut message_spans: Vec<(usize, usize, AnthropicCacheControl)> = Vec::new();
         let mut input_messages: Vec<InputMessage> = Vec::with_capacity(self.messages.len());
-        for msg in self.messages {
+        for (message_idx, msg) in self.messages.into_iter().enumerate() {
             let role = match msg.role {
                 AnthropicRoleOwned::User => Role::User,
                 AnthropicRoleOwned::Assistant => Role::Assistant,
@@ -913,7 +912,11 @@ impl AnthropicMessagesParams {
                     vec![InputMessageContent::Text(Text { text: s })]
                 }
                 AnthropicMessageContentOwned::Blocks(blocks) => {
-                    blocks_into_input_content(blocks, &tool_use_name_map)?
+                    let (content, spans) = blocks_into_input_content(blocks, &tool_use_name_map)?;
+                    for (content_idx, marker) in spans {
+                        message_spans.push((message_idx, content_idx, marker));
+                    }
+                    content
                 }
             };
 
@@ -921,10 +924,15 @@ impl AnthropicMessagesParams {
         }
 
         // --- Dynamic tool params ---
+        let mut tool_spans: Vec<(usize, AnthropicCacheControl)> = Vec::new();
         let additional_tools = self.tools.map(|tools| {
             tools
                 .into_iter()
-                .map(|t| {
+                .enumerate()
+                .map(|(tool_idx, t)| {
+                    if let Some(marker) = t.cache_control {
+                        tool_spans.push((tool_idx, marker));
+                    }
                     crate::tool::Tool::Function(crate::tool::FunctionTool {
                         name: t.name,
                         description: t.description.unwrap_or_default(),
@@ -1072,19 +1080,62 @@ impl AnthropicMessagesParams {
             extra_body,
             extra_headers,
             internal_dynamic_variant_config: None,
+            cache_control_spans: system_spans
+                .into_iter()
+                .map(|(block_idx, marker)| CacheControlSpan {
+                    target: CacheControlTarget::SystemBlock { block_idx },
+                    marker,
+                })
+                .chain(
+                    message_spans
+                        .into_iter()
+                        .map(|(message_idx, content_idx, marker)| CacheControlSpan {
+                            target: CacheControlTarget::MessageContent {
+                                message_idx,
+                                content_idx,
+                            },
+                            marker,
+                        }),
+                )
+                .chain(
+                    tool_spans
+                        .into_iter()
+                        .map(|(tool_idx, marker)| CacheControlSpan {
+                            target: CacheControlTarget::Tool { tool_idx },
+                            marker,
+                        }),
+                )
+                .collect(),
         })
     }
 }
 
 /// Converts a list of Anthropic content blocks to TensorZero `InputMessageContent` items.
+///
+/// Also returns any per-block `cache_control` spans encountered, as `(content_idx, marker)`
+/// pairs so the caller can build `CacheControlSpan` values with the correct `message_idx`.
+#[expect(clippy::type_complexity)]
 fn blocks_into_input_content(
     blocks: Vec<AnthropicContentBlockOwned>,
     tool_use_name_map: &HashMap<String, String>,
-) -> Result<Vec<InputMessageContent>, Error> {
+) -> Result<
+    (
+        Vec<InputMessageContent>,
+        Vec<(usize, AnthropicCacheControl)>,
+    ),
+    Error,
+> {
     let mut result = Vec::with_capacity(blocks.len());
-    for block in blocks {
+    let mut spans = Vec::new();
+    for (content_idx, block) in blocks.into_iter().enumerate() {
         match block {
-            AnthropicContentBlockOwned::Text { text, .. } => {
+            AnthropicContentBlockOwned::Text {
+                text,
+                cache_control,
+            } => {
+                if let Some(marker) = cache_control {
+                    spans.push((content_idx, marker));
+                }
                 result.push(InputMessageContent::Text(Text { text }));
             }
             AnthropicContentBlockOwned::Thinking {
@@ -1116,8 +1167,14 @@ fn blocks_into_input_content(
                 }));
             }
             AnthropicContentBlockOwned::ToolUse {
-                id, name, input, ..
+                id,
+                name,
+                input,
+                cache_control,
             } => {
+                if let Some(marker) = cache_control {
+                    spans.push((content_idx, marker));
+                }
                 result.push(InputMessageContent::ToolCall(ToolCallWrapper::ToolCall(
                     ToolCall {
                         id,
@@ -1130,8 +1187,11 @@ fn blocks_into_input_content(
                 tool_use_id,
                 content,
                 is_error: _,
-                ..
+                cache_control,
             } => {
+                if let Some(marker) = cache_control {
+                    spans.push((content_idx, marker));
+                }
                 // Concatenate tool result content blocks into a single string.
                 // Error on unsupported sub-block types instead of silently dropping.
                 let mut result_text = String::new();
@@ -1164,7 +1224,13 @@ fn blocks_into_input_content(
                     result: result_text,
                 }));
             }
-            AnthropicContentBlockOwned::Image { source, .. } => {
+            AnthropicContentBlockOwned::Image {
+                source,
+                cache_control,
+            } => {
+                if let Some(marker) = cache_control {
+                    spans.push((content_idx, marker));
+                }
                 let file = match source {
                     AnthropicImageSourceOwned::Base64 { media_type, data } => {
                         let mime_type: MediaType = media_type.parse().map_err(|_| {
@@ -1199,7 +1265,13 @@ fn blocks_into_input_content(
                 };
                 result.push(InputMessageContent::File(file));
             }
-            AnthropicContentBlockOwned::Document { source, .. } => {
+            AnthropicContentBlockOwned::Document {
+                source,
+                cache_control,
+            } => {
+                if let Some(marker) = cache_control {
+                    spans.push((content_idx, marker));
+                }
                 let file = match source {
                     AnthropicDocumentSourceOwned::Base64 { media_type, data } => {
                         let mime_type: MediaType = media_type.parse().map_err(|_| {
@@ -1236,7 +1308,7 @@ fn blocks_into_input_content(
             }
         }
     }
-    Ok(result)
+    Ok((result, spans))
 }
 
 /// Converts an owned Anthropic tool choice to the internal `ToolChoice`.
@@ -2073,6 +2145,87 @@ mod tests {
         }
         assert_eq!(resp.model, "tensorzero::test_variant");
         assert!(resp.stop_reason.is_none());
+    }
+
+    #[test]
+    fn test_try_into_params_cache_control_spans() {
+        let json = r#"{
+            "model": "my_function",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Hello", "cache_control": {"type": "ephemeral"}},
+                    {"type": "image", "source": {"type": "base64", "data": "abc", "media_type": "image/png"}, "cache_control": {"type": "ephemeral"}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tu1", "name": "get_weather", "input": {}, "cache_control": {"type": "ephemeral"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tu1", "content": "sunny", "cache_control": {"type": "ephemeral"}}
+                ]}
+            ],
+            "max_tokens": 100,
+            "system": [
+                {"type": "text", "text": "Sys1", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "Sys2"}
+            ],
+            "tools": [
+                {"name": "get_weather", "description": "Get weather", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral"}}
+            ]
+        }"#;
+        let params: AnthropicMessagesParams = serde_json::from_str(json).unwrap();
+        let internal = params.try_into_params().unwrap();
+
+        let spans = internal.cache_control_spans;
+        assert_eq!(
+            spans.len(),
+            6,
+            "expected 6 cache_control spans, got {spans:?}"
+        );
+
+        // system block 0
+        assert!(
+            spans
+                .iter()
+                .any(|s| matches!(s.target, CacheControlTarget::SystemBlock { block_idx: 0 }))
+        );
+        // message 0, content 0 (text)
+        assert!(spans.iter().any(|s| matches!(
+            s.target,
+            CacheControlTarget::MessageContent {
+                message_idx: 0,
+                content_idx: 0
+            }
+        )));
+        // message 0, content 1 (image)
+        assert!(spans.iter().any(|s| matches!(
+            s.target,
+            CacheControlTarget::MessageContent {
+                message_idx: 0,
+                content_idx: 1
+            }
+        )));
+        // message 1, content 0 (tool_use)
+        assert!(spans.iter().any(|s| matches!(
+            s.target,
+            CacheControlTarget::MessageContent {
+                message_idx: 1,
+                content_idx: 0
+            }
+        )));
+        // message 2, content 0 (tool_result)
+        assert!(spans.iter().any(|s| matches!(
+            s.target,
+            CacheControlTarget::MessageContent {
+                message_idx: 2,
+                content_idx: 0
+            }
+        )));
+        // tool 0
+        assert!(
+            spans
+                .iter()
+                .any(|s| matches!(s.target, CacheControlTarget::Tool { tool_idx: 0 }))
+        );
     }
 
     #[test]

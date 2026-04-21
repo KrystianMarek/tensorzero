@@ -44,7 +44,10 @@ use crate::model::{ModelProviderRequestInfo, ProviderInferenceRequest};
 use crate::providers::helpers::{
     inject_extra_request_data_and_send, inject_extra_request_data_and_send_eventsource,
 };
-use tensorzero_inference_types::{FunctionToolDef, ProviderToolCallConfig};
+use tensorzero_inference_types::{
+    CacheControlSpan, CacheControlTarget, FunctionToolDef, ProviderToolCallConfig,
+};
+use tensorzero_types_providers::anthropic::AnthropicCacheControl;
 
 use crate::tool::{ToolCall, ToolCallChunk, ToolChoice};
 use crate::utils::deprecation_warning;
@@ -606,15 +609,22 @@ pub(super) struct AnthropicFunctionTool<'a> {
     pub(super) input_schema: &'a Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) strict: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) cache_control: Option<AnthropicCacheControl>,
 }
 
 impl<'a> AnthropicFunctionTool<'a> {
-    pub fn new(tool: &'a FunctionToolDef, supports_strict_mode: bool) -> Self {
+    pub fn new(
+        tool: &'a FunctionToolDef,
+        supports_strict_mode: bool,
+        cache_control: Option<AnthropicCacheControl>,
+    ) -> Self {
         Self {
             name: &tool.name,
             description: Some(&tool.description),
             input_schema: &tool.parameters,
             strict: supports_strict_mode.then_some(tool.strict),
+            cache_control,
         }
     }
 }
@@ -636,6 +646,7 @@ pub(super) fn build_anthropic_tools<'a>(
     tool_config: Option<&'a Cow<'a, ProviderToolCallConfig>>,
     provider_tools: &'a [Value],
     supports_strict_mode: bool,
+    cache_control_spans: &[CacheControlSpan],
 ) -> Result<Option<Vec<AnthropicTool<'a>>>, Error> {
     // Workaround for Anthropic API limitation: they don't support explicitly specifying "none"
     // for tool choice. When ToolChoice::None is specified, we don't send any tools in the
@@ -647,8 +658,21 @@ pub(super) fn build_anthropic_tools<'a>(
         Some(c) => {
             let mut all_tools: Vec<AnthropicTool<'a>> = c
                 .strict_tools_available()?
-                .map(|tool| {
-                    AnthropicTool::Function(AnthropicFunctionTool::new(tool, supports_strict_mode))
+                .enumerate()
+                .map(|(tool_idx, tool)| {
+                    let cache_control = cache_control_spans.iter().find_map(|span| {
+                        if let CacheControlTarget::Tool { tool_idx: ti } = span.target
+                            && ti == tool_idx
+                        {
+                            return Some(span.marker.clone());
+                        }
+                        None
+                    });
+                    AnthropicTool::Function(AnthropicFunctionTool::new(
+                        tool,
+                        supports_strict_mode,
+                        cache_control,
+                    ))
                 })
                 .collect();
             all_tools.extend(provider_tools.iter().map(AnthropicTool::Provider));
@@ -673,16 +697,24 @@ pub(super) fn build_anthropic_tools<'a>(
 pub(super) enum AnthropicMessageContent<'a> {
     Text {
         text: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
     },
     Image {
         source: AnthropicDocumentSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
     },
     Document {
         source: AnthropicDocumentSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
     },
     ToolResult {
         tool_use_id: &'a str,
         content: Vec<AnthropicMessageContent<'a>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
     },
     Thinking {
         thinking: Option<&'a str>,
@@ -695,6 +727,8 @@ pub(super) enum AnthropicMessageContent<'a> {
         id: &'a str,
         name: &'a str,
         input: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
     },
 }
 
@@ -711,12 +745,16 @@ pub enum AnthropicDocumentSource {
 impl<'a> AnthropicMessageContent<'a> {
     pub(super) async fn from_content_block(
         block: &'a ContentBlock,
+        cache_control: Option<AnthropicCacheControl>,
         messages_config: AnthropicMessagesConfig,
         provider_type: &str,
     ) -> Result<Option<FlattenUnknown<'a, AnthropicMessageContent<'a>>>, Error> {
         match block {
             ContentBlock::Text(Text { text }) => Ok(Some(FlattenUnknown::Normal(
-                AnthropicMessageContent::Text { text },
+                AnthropicMessageContent::Text {
+                    text,
+                    cache_control,
+                },
             ))),
             ContentBlock::ToolCall(tool_call) => {
                 // Convert the tool call arguments from String to JSON Value (Anthropic expects an object)
@@ -750,6 +788,7 @@ impl<'a> AnthropicMessageContent<'a> {
                         id: &tool_call.id,
                         name: &tool_call.name,
                         input,
+                        cache_control,
                     },
                 )))
             }
@@ -758,7 +797,9 @@ impl<'a> AnthropicMessageContent<'a> {
                     tool_use_id: &tool_result.id,
                     content: vec![AnthropicMessageContent::Text {
                         text: &tool_result.result,
+                        cache_control: None,
                     }],
+                    cache_control,
                 },
             ))),
             ContentBlock::File(file) => match &**file {
@@ -785,6 +826,7 @@ impl<'a> AnthropicMessageContent<'a> {
                                 source: AnthropicDocumentSource::Url {
                                     url: url.to_string(),
                                 },
+                                cache_control,
                             },
                         )))
                     } else {
@@ -793,6 +835,7 @@ impl<'a> AnthropicMessageContent<'a> {
                                 source: AnthropicDocumentSource::Url {
                                     url: url.to_string(),
                                 },
+                                cache_control,
                             },
                         )))
                     }
@@ -817,11 +860,17 @@ impl<'a> AnthropicMessageContent<'a> {
                     };
                     if file.mime_type.type_() == mime::IMAGE {
                         Ok(Some(FlattenUnknown::Normal(
-                            AnthropicMessageContent::Image { source: document },
+                            AnthropicMessageContent::Image {
+                                source: document,
+                                cache_control,
+                            },
                         )))
                     } else {
                         Ok(Some(FlattenUnknown::Normal(
-                            AnthropicMessageContent::Document { source: document },
+                            AnthropicMessageContent::Document {
+                                source: document,
+                                cache_control,
+                            },
                         )))
                     }
                 }
@@ -858,12 +907,31 @@ pub(super) struct AnthropicMessage<'a> {
 impl<'a> AnthropicMessage<'a> {
     pub(super) async fn from_request_message(
         message: &'a RequestMessage,
+        message_idx: usize,
+        cache_control_spans: &[CacheControlSpan],
         messages_config: AnthropicMessagesConfig,
         provider_type: &str,
     ) -> Result<Self, Error> {
         let content: Vec<FlattenUnknown<AnthropicMessageContent>> =
-            try_join_all(message.content.iter().map(|c| {
-                AnthropicMessageContent::from_content_block(c, messages_config, provider_type)
+            try_join_all(message.content.iter().enumerate().map(|(content_idx, c)| {
+                let cache_control = cache_control_spans.iter().find_map(|span| {
+                    if let CacheControlTarget::MessageContent {
+                        message_idx: mi,
+                        content_idx: ci,
+                    } = span.target
+                        && mi == message_idx
+                        && ci == content_idx
+                    {
+                        return Some(span.marker.clone());
+                    }
+                    None
+                });
+                AnthropicMessageContent::from_content_block(
+                    c,
+                    cache_control,
+                    messages_config,
+                    provider_type,
+                )
             }))
             .await?
             .into_iter()
@@ -882,7 +950,8 @@ impl<'a> AnthropicMessage<'a> {
 pub(super) enum AnthropicSystemBlock<'a> {
     Text {
         text: &'a str,
-        // This also contains cache control and citations but we will ignore these for now.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
     },
 }
 
@@ -972,13 +1041,27 @@ impl<'a> AnthropicRequestBody<'a> {
         };
         // We use the content block form rather than string so people can use
         // extra_body for cache control.
-        let system = request
-            .system
-            .as_deref()
-            .map(|text| vec![AnthropicSystemBlock::Text { text }]);
+        let system = request.system.as_deref().map(|text| {
+            let cache_control = request.cache_control_spans.iter().find_map(|span| {
+                if let CacheControlTarget::SystemBlock { block_idx: 0 } = span.target {
+                    return Some(span.marker.clone());
+                }
+                None
+            });
+            vec![AnthropicSystemBlock::Text {
+                text,
+                cache_control,
+            }]
+        });
         let messages: Vec<AnthropicMessage> =
-            try_join_all(request.messages.iter().map(|m| {
-                AnthropicMessage::from_request_message(m, messages_config, PROVIDER_TYPE)
+            try_join_all(request.messages.iter().enumerate().map(|(message_idx, m)| {
+                AnthropicMessage::from_request_message(
+                    m,
+                    message_idx,
+                    &request.cache_control_spans,
+                    messages_config,
+                    PROVIDER_TYPE,
+                )
             }))
             .await?;
         let messages = if needs_json_prefill(request) {
@@ -987,7 +1070,12 @@ impl<'a> AnthropicRequestBody<'a> {
             messages
         };
 
-        let tools = build_anthropic_tools(request.tool_config.as_ref(), provider_tools, true)?;
+        let tools = build_anthropic_tools(
+            request.tool_config.as_ref(),
+            provider_tools,
+            true,
+            &request.cache_control_spans,
+        )?;
 
         // `tool_choice` should only be set if tools are set and non-empty
         let tool_choice: Option<AnthropicToolChoice> = tools
@@ -1145,6 +1233,7 @@ fn prefill_json_message(messages: Vec<AnthropicMessage>) -> Vec<AnthropicMessage
         role: AnthropicRole::Assistant,
         content: vec![FlattenUnknown::Normal(AnthropicMessageContent::Text {
             text: "Here is the JSON requested:\n{",
+            cache_control: None,
         })],
     });
     messages
@@ -1913,7 +2002,7 @@ mod tests {
             parameters: parameters.clone(),
             strict: false,
         };
-        let anthropic_tool: AnthropicFunctionTool = AnthropicFunctionTool::new(&tool, true);
+        let anthropic_tool: AnthropicFunctionTool = AnthropicFunctionTool::new(&tool, true, None);
         assert_eq!(
             anthropic_tool,
             AnthropicFunctionTool {
@@ -1921,6 +2010,7 @@ mod tests {
                 description: Some("test"),
                 input_schema: &parameters,
                 strict: Some(false),
+                cache_control: None,
             }
         );
     }
@@ -1930,6 +2020,7 @@ mod tests {
         let text_content_block: ContentBlock = "test".to_string().into();
         let anthropic_content_block = AnthropicMessageContent::from_content_block(
             &text_content_block,
+            None,
             AnthropicMessagesConfig {
                 fetch_and_encode_input_files_before_inference: false,
             },
@@ -1940,7 +2031,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             anthropic_content_block,
-            FlattenUnknown::Normal(AnthropicMessageContent::Text { text: "test" })
+            FlattenUnknown::Normal(AnthropicMessageContent::Text {
+                text: "test",
+                cache_control: None,
+            })
         );
 
         let tool_call_content_block = ContentBlock::ToolCall(ToolCall {
@@ -1950,6 +2044,7 @@ mod tests {
         });
         let anthropic_content_block = AnthropicMessageContent::from_content_block(
             &tool_call_content_block,
+            None,
             AnthropicMessagesConfig {
                 fetch_and_encode_input_files_before_inference: false,
             },
@@ -1963,7 +2058,8 @@ mod tests {
             FlattenUnknown::Normal(AnthropicMessageContent::ToolUse {
                 id: "test_id",
                 name: "test_name",
-                input: json!({"type": "string"})
+                input: json!({"type": "string"}),
+                cache_control: None,
             })
         );
     }
@@ -1977,6 +2073,8 @@ mod tests {
         };
         let anthropic_message = AnthropicMessage::from_request_message(
             &inference_request_message,
+            0,
+            &[],
             AnthropicMessagesConfig {
                 fetch_and_encode_input_files_before_inference: false,
             },
@@ -1989,7 +2087,8 @@ mod tests {
             AnthropicMessage {
                 role: AnthropicRole::User,
                 content: vec![FlattenUnknown::Normal(AnthropicMessageContent::Text {
-                    text: "test"
+                    text: "test",
+                    cache_control: None,
                 })],
             }
         );
@@ -2001,6 +2100,8 @@ mod tests {
         };
         let anthropic_message = AnthropicMessage::from_request_message(
             &inference_request_message,
+            0,
+            &[],
             AnthropicMessagesConfig {
                 fetch_and_encode_input_files_before_inference: false,
             },
@@ -2014,6 +2115,7 @@ mod tests {
                 role: AnthropicRole::Assistant,
                 content: vec![FlattenUnknown::Normal(AnthropicMessageContent::Text {
                     text: "test_assistant",
+                    cache_control: None,
                 })],
             }
         );
@@ -2029,6 +2131,8 @@ mod tests {
         };
         let anthropic_message = AnthropicMessage::from_request_message(
             &inference_request_message,
+            0,
+            &[],
             AnthropicMessagesConfig {
                 fetch_and_encode_input_files_before_inference: false,
             },
@@ -2044,10 +2148,53 @@ mod tests {
                     AnthropicMessageContent::ToolResult {
                         tool_use_id: "test_tool_call_id",
                         content: vec![AnthropicMessageContent::Text {
-                            text: "test_tool_response"
+                            text: "test_tool_response",
+                            cache_control: None,
                         }],
+                        cache_control: None,
                     }
                 )],
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_from_request_message_with_cache_control_spans() {
+        let inference_request_message = RequestMessage {
+            role: Role::User,
+            content: vec!["test".to_string().into()],
+        };
+        let spans = vec![CacheControlSpan {
+            target: CacheControlTarget::MessageContent {
+                message_idx: 0,
+                content_idx: 0,
+            },
+            marker: AnthropicCacheControl {
+                cache_type:
+                    tensorzero_types_providers::anthropic::AnthropicCacheControlType::Ephemeral,
+            },
+        }];
+        let anthropic_message = AnthropicMessage::from_request_message(
+            &inference_request_message,
+            0,
+            &spans,
+            AnthropicMessagesConfig {
+                fetch_and_encode_input_files_before_inference: false,
+            },
+            PROVIDER_TYPE,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            anthropic_message,
+            AnthropicMessage {
+                role: AnthropicRole::User,
+                content: vec![FlattenUnknown::Normal(AnthropicMessageContent::Text {
+                    text: "test",
+                    cache_control: Some(AnthropicCacheControl {
+                        cache_type: tensorzero_types_providers::anthropic::AnthropicCacheControlType::Ephemeral,
+                    }),
+                })],
             }
         );
     }
@@ -2118,6 +2265,8 @@ mod tests {
                 messages: vec![
                     AnthropicMessage::from_request_message(
                         &inference_request.messages[0],
+                        0,
+                        &[],
                         AnthropicMessagesConfig {
                             fetch_and_encode_input_files_before_inference: false,
                         },
@@ -2129,7 +2278,8 @@ mod tests {
                 max_tokens: 64_000,
                 stream: Some(false),
                 system: Some(vec![AnthropicSystemBlock::Text {
-                    text: "test_system"
+                    text: "test_system",
+                    cache_control: None,
                 }]),
                 ..Default::default()
             }
@@ -2174,6 +2324,8 @@ mod tests {
                 messages: vec![
                     AnthropicMessage::from_request_message(
                         &inference_request.messages[0],
+                        0,
+                        &[],
                         AnthropicMessagesConfig {
                             fetch_and_encode_input_files_before_inference: false,
                         },
@@ -2183,6 +2335,8 @@ mod tests {
                     .unwrap(),
                     AnthropicMessage::from_request_message(
                         &inference_request.messages[1],
+                        1,
+                        &[],
                         AnthropicMessagesConfig {
                             fetch_and_encode_input_files_before_inference: false,
                         },
@@ -2194,7 +2348,8 @@ mod tests {
                 max_tokens: 100,
                 stream: Some(true),
                 system: Some(vec![AnthropicSystemBlock::Text {
-                    text: "test_system"
+                    text: "test_system",
+                    cache_control: None,
                 }]),
                 temperature: Some(0.5),
                 ..Default::default()
@@ -2238,15 +2393,19 @@ mod tests {
             AnthropicRequestBody::new(&model, &inference_request, &[]).await;
         assert!(anthropic_request_body.is_ok());
         // Convert messages asynchronously
-        let expected_messages = try_join_all(inference_request.messages.iter().map(|m| {
-            AnthropicMessage::from_request_message(
-                m,
-                AnthropicMessagesConfig {
-                    fetch_and_encode_input_files_before_inference: false,
-                },
-                PROVIDER_TYPE,
-            )
-        }))
+        let expected_messages = try_join_all(inference_request.messages.iter().enumerate().map(
+            |(message_idx, m)| {
+                AnthropicMessage::from_request_message(
+                    m,
+                    message_idx,
+                    &[],
+                    AnthropicMessagesConfig {
+                        fetch_and_encode_input_files_before_inference: false,
+                    },
+                    PROVIDER_TYPE,
+                )
+            },
+        ))
         .await
         .unwrap();
 
@@ -2303,6 +2462,8 @@ mod tests {
             result.messages[0],
             AnthropicMessage::from_request_message(
                 &inference_request.messages[0],
+                0,
+                &[],
                 AnthropicMessagesConfig {
                     fetch_and_encode_input_files_before_inference: false,
                 },
@@ -2315,6 +2476,8 @@ mod tests {
             result.messages[1],
             AnthropicMessage::from_request_message(
                 &inference_request.messages[1],
+                1,
+                &[],
                 AnthropicMessagesConfig {
                     fetch_and_encode_input_files_before_inference: false,
                 },
@@ -2329,6 +2492,7 @@ mod tests {
                 role: AnthropicRole::Assistant,
                 content: vec![FlattenUnknown::Normal(AnthropicMessageContent::Text {
                     text: "Here is the JSON requested:\n{",
+                    cache_control: None,
                 })],
             }
         );
@@ -3536,6 +3700,7 @@ mod tests {
             role: AnthropicRole::User,
             content: vec![FlattenUnknown::Normal(AnthropicMessageContent::Text {
                 text: "Generate some JSON",
+                cache_control: None,
             })],
         }];
 
@@ -3551,6 +3716,7 @@ mod tests {
             result[0].content,
             vec![FlattenUnknown::Normal(AnthropicMessageContent::Text {
                 text: "Generate some JSON",
+                cache_control: None,
             })]
         );
 
@@ -3560,6 +3726,7 @@ mod tests {
             result[1].content,
             vec![FlattenUnknown::Normal(AnthropicMessageContent::Text {
                 text: "Here is the JSON requested:\n{",
+                cache_control: None,
             })]
         );
     }
@@ -3930,9 +4097,13 @@ mod tests {
             fetch_and_encode_input_files_before_inference: false,
         };
 
-        let _result =
-            AnthropicMessageContent::from_content_block(&content_block, config, PROVIDER_TYPE)
-                .await;
+        let _result = AnthropicMessageContent::from_content_block(
+            &content_block,
+            None,
+            config,
+            PROVIDER_TYPE,
+        )
+        .await;
 
         // Should log a warning about detail not being supported
         assert!(logs_contain(
@@ -3965,7 +4136,7 @@ mod tests {
         let tools: Vec<AnthropicFunctionTool> = provider_tool_config
             .strict_tools_available()
             .unwrap()
-            .map(|tool| AnthropicFunctionTool::new(tool, true))
+            .map(|tool| AnthropicFunctionTool::new(tool, true, None))
             .collect();
 
         // Verify only the allowed tool is included

@@ -2094,6 +2094,7 @@ mod tests {
             extra_headers: Default::default(),
             fetch_and_encode_input_files_before_inference: false,
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let response = function_config
             .prepare_response(
@@ -2436,6 +2437,7 @@ mod tests {
             extra_headers: Default::default(),
             fetch_and_encode_input_files_before_inference: false,
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         // Test with a correct content block
         let inference_id = Uuid::now_v7();

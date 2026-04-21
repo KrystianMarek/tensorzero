@@ -148,6 +148,7 @@ pub struct InferenceConfig {
     /// to have different cache keys.
     /// This field should only ever be forwarded to `ModelInferenceRequest`
     pub extra_cache_key: Option<String>,
+    pub cache_control_spans: Vec<tensorzero_inference_types::CacheControlSpan>,
 }
 
 /// Maps to the subset of Config that applies to the current inference request.
@@ -189,6 +190,7 @@ impl BatchInferenceConfig {
                 extra_body: Default::default(),
                 extra_headers: Default::default(),
                 extra_cache_key: None,
+                cache_control_spans: Vec::new(),
             },
         )
         .collect()
@@ -818,6 +820,7 @@ fn prepare_model_inference_request<'request>(
                     thinking_budget_tokens: inference_params.chat_completion.thinking_budget_tokens,
                     verbosity: inference_params.chat_completion.verbosity.clone(),
                 },
+                cache_control_spans: inference_config.cache_control_spans.clone(),
             }
         }
         FunctionConfig::Json(json_config) => {
@@ -869,6 +872,7 @@ fn prepare_model_inference_request<'request>(
                     thinking_budget_tokens: inference_params.chat_completion.thinking_budget_tokens,
                     verbosity: inference_params.chat_completion.verbosity.clone(),
                 },
+                cache_control_spans: inference_config.cache_control_spans.clone(),
             }
         }
     })
@@ -1155,6 +1159,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
 
         // Define common inference parameters
@@ -1301,6 +1306,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let json_mode = JsonMode::Tool;
 
@@ -1411,6 +1417,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
 
         // Test case 1: Successful inference with ChatCompletionConfig and FunctionConfigChat
@@ -1745,6 +1752,7 @@ mod tests {
             extra_body: Default::default(),
             extra_headers: Default::default(),
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
 
         let model_name = "dummy_chat_model";

@@ -36,6 +36,7 @@ use tensorzero_derive::{TensorZeroDeserialize, export_schema};
 use tensorzero_error::Error;
 use tensorzero_types::inference_params::JsonMode;
 use tensorzero_types::{Text, Thought, ToolCall, Unknown};
+pub use tensorzero_types_providers::anthropic::AnthropicCacheControl;
 
 // Re-export types that were moved to tensorzero-types
 pub use tensorzero_types::{FinishReason, RawUsageEntry, Usage, raw_usage_entries_from_value};
@@ -997,6 +998,44 @@ pub enum ToolConfigRef<'a> {
 }
 
 // =============================================================================
+// CacheControlSpan
+// =============================================================================
+
+/// Side-channel marker that tells a provider to emit `cache_control` on a
+/// specific outbound block.
+///
+/// Populated by the Anthropic-compatible ingress and consumed by the
+/// Anthropic and GCP Vertex Anthropic providers.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct CacheControlSpan {
+    pub target: CacheControlTarget,
+    pub marker: AnthropicCacheControl,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub enum CacheControlTarget {
+    MessageContent {
+        message_idx: usize,
+        content_idx: usize,
+    },
+    Tool {
+        tool_idx: usize,
+    },
+    SystemBlock {
+        block_idx: usize,
+    },
+}
+
+impl Default for CacheControlTarget {
+    fn default() -> Self {
+        CacheControlTarget::MessageContent {
+            message_idx: 0,
+            content_idx: 0,
+        }
+    }
+}
+
+// =============================================================================
 // ModelInferenceRequest
 // =============================================================================
 
@@ -1029,6 +1068,8 @@ pub struct ModelInferenceRequest<'a> {
     #[serde(flatten)]
     pub inference_params_v2: tensorzero_types::inference_params::ChatCompletionInferenceParamsV2,
     pub fetch_and_encode_input_files_before_inference: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cache_control_spans: Vec<CacheControlSpan>,
 }
 
 impl<'a> ModelInferenceRequest<'a> {

@@ -1173,6 +1173,7 @@ pub async fn write_completed_batch_inference<'a>(
             extra_body,
             extra_headers,
             extra_cache_key: None,
+            cache_control_spans: Vec::new(),
         };
         let inference_params_owned = inference_params.map(Cow::into_owned).unwrap_or_default();
         let inference_result = function

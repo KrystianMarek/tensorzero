@@ -742,6 +742,7 @@ mod tests {
                     thinking_budget_tokens: Some(1000),
                     verbosity: Some("verbose".to_string()),
                 },
+                cache_control_spans: Vec::new(),
             };
 
             let key = cache_key_for(&request, "model", "provider");
@@ -797,6 +798,7 @@ mod tests {
             extra_cache_key: _,
             stop_sequences: _,
             inference_params_v2: _,
+            cache_control_spans: _,
         } = fixture.request;
 
         // Expect a compile time error if this is incorrect.

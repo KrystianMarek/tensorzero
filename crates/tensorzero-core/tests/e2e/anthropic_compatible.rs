@@ -320,6 +320,7 @@ async fn test_anthropic_system_message_blocks() {
         messages: vec![user_msg("Hello")],
         system: AnthropicSystem::Blocks(vec![AnthropicSystemContentBlockOwned::Text {
             text: "TensorBot".to_string(),
+            cache_control: None,
         }]),
         max_tokens: 100,
         temperature: None,

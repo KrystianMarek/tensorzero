@@ -159,6 +159,7 @@ impl TryFrom<ClientInferenceParams> for Params {
             extra_body: this.extra_body,
             extra_headers: this.extra_headers,
             internal_dynamic_variant_config: this.internal_dynamic_variant_config,
+            cache_control_spans: Vec::new(),
         })
     }
 }
@@ -219,6 +220,7 @@ fn assert_params_match(client_params: ClientInferenceParams) {
         extra_body,
         extra_headers,
         internal_dynamic_variant_config,
+        cache_control_spans: Vec::new(),
     };
 }
 
