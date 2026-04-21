@@ -1,10 +1,11 @@
+#![expect(clippy::expect_used)]
+
 //! Streaming types and state machine for Anthropic-compatible ingress.
 //!
 //! Converts TensorZero's flat `ProviderInferenceResponseStream` chunks into
 //! Anthropic's block-oriented SSE event sequence:
 //!
 //! ```text
-#![expect(clippy::expect_used)]
 //! message_start
 //! content_block_start (one per block, monotonic index)
 //! content_block_delta (zero or more inside a block)
@@ -826,7 +827,6 @@ impl Stream for AnthropicStreamAdapter {
                     message: format!("Failed to serialize stream event: {e}"),
                 })
             });
-            self.event_id += 1;
             if result.is_ok() {
                 self.buffer.push(result);
             }

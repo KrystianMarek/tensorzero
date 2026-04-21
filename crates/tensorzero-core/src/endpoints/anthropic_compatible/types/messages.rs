@@ -19,6 +19,7 @@ use crate::inference::types::{Base64File, File, UrlFile};
 
 use crate::cache::CacheParamsOptions;
 use crate::config::Namespace;
+use crate::endpoints::anthropic_compatible::types::streaming::finish_reason_to_anthropic_stop_reason;
 use crate::endpoints::inference::{InferenceCredentials, InferenceParams};
 use crate::error::{Error, ErrorDetails};
 use crate::inference::types::Input;
@@ -30,9 +31,7 @@ use tensorzero_types::message::InputMessage;
 use tensorzero_types::message::InputMessageContent;
 use tensorzero_types::role::Role;
 use tensorzero_types::tool::{ToolCall, ToolCallWrapper, ToolResult};
-use tensorzero_types::{
-    ContentBlockChatOutput, FinishReason, InferenceResponse, JsonInferenceOutput, Usage,
-};
+use tensorzero_types::{ContentBlockChatOutput, InferenceResponse, JsonInferenceOutput, Usage};
 use tensorzero_types_providers::anthropic::AnthropicStopReason;
 
 // ============================================================================
@@ -766,22 +765,7 @@ pub fn inference_response_to_anthropic(
 
     let usage = usage_to_anthropic(&usage);
 
-    let stop_reason = match finish_reason {
-        Some(FinishReason::Stop) => {
-            Some(tensorzero_types_providers::anthropic::AnthropicStopReason::EndTurn)
-        }
-        Some(FinishReason::Length) => {
-            Some(tensorzero_types_providers::anthropic::AnthropicStopReason::MaxTokens)
-        }
-        Some(FinishReason::ToolCall) => {
-            Some(tensorzero_types_providers::anthropic::AnthropicStopReason::ToolUse)
-        }
-        Some(FinishReason::StopSequence) => {
-            Some(tensorzero_types_providers::anthropic::AnthropicStopReason::StopSequence)
-        }
-        // ContentFilter and Unknown don't map to standard Anthropic stop_reason values
-        Some(_) | None => None,
-    };
+    let stop_reason = finish_reason_to_anthropic_stop_reason(finish_reason);
 
     let model = if model_prefix.is_empty() {
         variant_name
@@ -1268,6 +1252,7 @@ fn tool_choice_owned_to_internal(choice: AnthropicToolChoiceOwned) -> crate::too
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tensorzero_types::FinishReason;
 
     #[test]
     fn test_deserialize_simple_request() {
