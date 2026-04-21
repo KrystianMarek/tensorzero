@@ -543,3 +543,28 @@ async fn test_anthropic_response_shape() {
     assert!(usage.get("input_tokens").is_some());
     assert!(usage.get("output_tokens").is_some());
 }
+
+/// Compile-gate for count_tokens endpoint (actual upstream call requires a real Anthropic key).
+#[cfg(feature = "e2e_tests")]
+#[gtest]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_count_tokens_anthropic_compile_gate() {
+    use tensorzero_core::endpoints::anthropic_compatible::messages::count_tokens_handler;
+
+    let client = tensorzero::test_helpers::make_embedded_gateway().await;
+    let state = client.get_app_state_data().unwrap().load_latest();
+
+    let body = serde_json::json!({
+        "model": "tensorzero::function_name::basic_test_no_system_schema",
+        "messages": [{"role": "user", "content": "Hello"}],
+    })
+    .to_string();
+
+    let response = count_tokens_handler(State(state), axum::body::Bytes::from(body))
+        .await
+        .unwrap();
+
+    // With the dummy provider underlying this function, we expect 501.
+    // This test is only verifying the endpoint is wired and compiles.
+    assert_eq!(response.status(), 501);
+}

@@ -63,7 +63,7 @@ lazy_static! {
             .expect("Failed to parse ANTHROPIC_DEFAULT_BASE_URL")
     };
 }
-const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+pub const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const PROVIDER_NAME: &str = "Anthropic";
 pub const PROVIDER_TYPE: &str = "anthropic";
 
@@ -168,10 +168,14 @@ impl AnthropicProvider {
         &self.provider_tools
     }
 
-    fn base_url(&self) -> &Url {
+    pub fn base_url(&self) -> &Url {
         self.api_base
             .as_ref()
             .unwrap_or(&ANTHROPIC_DEFAULT_BASE_URL)
+    }
+
+    pub fn credentials(&self) -> &AnthropicCredentials {
+        &self.credentials
     }
 
     fn messages_url(&self) -> Result<Url, Error> {
@@ -212,7 +216,7 @@ impl TryFrom<Credential> for AnthropicCredentials {
 }
 
 impl AnthropicCredentials {
-    fn get_api_key<'a>(
+    pub fn get_api_key<'a>(
         &'a self,
         dynamic_api_keys: &'a InferenceCredentials,
     ) -> Result<&'a SecretString, DelayedError> {

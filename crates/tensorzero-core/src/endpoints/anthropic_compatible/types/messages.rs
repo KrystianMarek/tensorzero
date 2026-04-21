@@ -86,7 +86,7 @@ pub struct AnthropicMessagesParams {
 }
 
 /// Deserializes the `system` field, which can be a `String` or a `Vec<SystemContentBlock>`.
-fn deserialize_system<'de, D>(deserializer: D) -> Result<AnthropicSystem, D::Error>
+pub(crate) fn deserialize_system<'de, D>(deserializer: D) -> Result<AnthropicSystem, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -106,6 +106,24 @@ where
             "system must be a string or array of content blocks",
         )),
     }
+}
+
+/// The top-level request body for `POST /v1/messages/count_tokens`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AnthropicCountTokensParams {
+    /// The model that will complete your messages.
+    pub model: String,
+    /// The messages to send to the model.
+    pub messages: Vec<AnthropicMessageOwned>,
+    /// System prompt (String or array of text blocks).
+    #[serde(default, deserialize_with = "deserialize_system")]
+    pub system: AnthropicSystem,
+    /// Tools.
+    #[serde(default)]
+    pub tools: Option<Vec<AnthropicToolOwned>>,
+    /// Metadata (TensorZero extension fields live under `metadata.tensorzero`).
+    #[serde(default)]
+    pub metadata: Option<AnthropicMetadata>,
 }
 
 /// System prompt — either a String or an array of content blocks.
